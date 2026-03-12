@@ -8,13 +8,15 @@ Single Node.js process with:
 - **RepoMemory embedded** — memory, recall, sessions, profiles, mining (no separate server)
 - **llama-server on-demand** — spawned as child_process, auto-stops after idle timeout (300s default)
 - **Web UI** — vanilla HTML served on `GET /`, zero frontend deps
-- **CLI** — commander-based: `setup`, `serve`, `chat`, `ask`, `status`
+- **CLI** — commander-based: `setup`, `serve`, `chat`, `ask`, `status`, `mcp-status`
+- **MCP client** — connects to external MCP servers, exposes their tools via `[MCP: ...]` tags
 
 ## Stack
 
 - TypeScript (ESM, Node 20+)
 - `node:http` (no express)
 - `@rckflr/repomemory` (embedded)
+- `@modelcontextprotocol/sdk` (MCP client)
 - `commander` (CLI)
 - `vitest` (tests)
 
@@ -22,7 +24,7 @@ Single Node.js process with:
 
 ```bash
 npm run build       # Compile TypeScript + copy UI assets to dist/
-npm test            # Run tests (89 tests, 6 suites)
+npm test            # Run tests (108 tests, 7 suites)
 npm start           # Start server (micro-expert serve)
 npm run dev         # TypeScript watch mode
 ```
@@ -32,7 +34,7 @@ npm run dev         # TypeScript watch mode
 1. `memory.recall(query, userId)` — retrieve CTT context + profile
 2. `buildMessages()` — context FIRST in system prompt (sub-1B attention optimization), date/time context, tool instructions
 3. `inference.chatCompletion(messages)` — send to llama-server
-4. `processToolCalls(content)` — detect `[CALC: expr]` and `[FETCH: METHOD url]` tags, execute, replace with results
+4. `processToolCalls(content)` — detect `[CALC: expr]`, `[FETCH: METHOD url]`, and `[MCP: tool args]` tags, execute, replace with results
 5. `memory.saveSession(userId, [user, assistant])` — persist the turn (with resolved tool results)
 
 Key design decisions:
@@ -43,6 +45,9 @@ Key design decisions:
 - Tool calling via tag-based format — sub-1B models can't do native function calling
 - `[CALC: expr]` — safe math evaluator (recursive descent parser, no `eval()`)
 - `[FETCH: METHOD url]` — HTTP requests with security (blocked hosts, timeout, size limits)
+- `[MCP: tool_name {"arg": "val"}]` — call tools from external MCP servers
+- MCP client connects to configured servers via stdio transport, discovers tools at startup
+- MCP servers configured in `~/.micro-expert/config.json` under `mcpServers` (same format as claude_desktop_config.json)
 - Memory import/export via API endpoints and CLI commands
 
 ## Conventions
@@ -75,6 +80,8 @@ Key design decisions:
 - Recall limit: 5 items
 - Recall template: `default`
 - Thinking mode: off
+- MCP servers: none (configure in config.json)
+- MCP max tools: 10 (limit for sub-1B prompt size)
 
 ## RepoMemory API Notes
 
@@ -89,9 +96,10 @@ Key design decisions:
 Tests in `tests/`:
 - `config.test.ts` — defaults, CLI overrides, env vars, priority (5 tests)
 - `memory-provider.test.ts` — recall, sessions, search, stats (6 tests)
-- `agent-loop.test.ts` — pipeline, streaming, history, date/time, CALC/FETCH tool calls (14 tests)
+- `agent-loop.test.ts` — pipeline, streaming, history, date/time, CALC/FETCH/MCP tool calls (20 tests)
 - `calculator.test.ts` — safe math evaluator: arithmetic, precedence, functions, errors (24 tests)
 - `http-tool.test.ts` — FETCH tag parsing, URL validation, security, execution (32 tests)
 - `memory-export.test.ts` — export/import round-trip, validation, error handling (8 tests)
+- `mcp-client.test.ts` — MCP client manager: connect, disconnect, tool discovery, calling, prompt generation (13 tests)
 
-Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch.
+Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport.

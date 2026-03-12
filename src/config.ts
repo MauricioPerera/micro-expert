@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { McpServerConfig } from './mcp/index.js';
 
 /** Base directory for all MicroExpert user data */
 export const MICRO_EXPERT_HOME = join(homedir(), '.micro-expert');
@@ -44,6 +45,10 @@ export interface MicroExpertConfig {
   threads: number;
   /** Recall template: default, technical, support, rag_focused */
   recallTemplate: string;
+  /** MCP server configurations (same format as claude_desktop_config.json) */
+  mcpServers: Record<string, McpServerConfig>;
+  /** Maximum number of MCP tools to expose to the model (sub-1B models need short prompts) */
+  mcpMaxTools: number;
 }
 
 const DEFAULTS: MicroExpertConfig = {
@@ -64,6 +69,8 @@ const DEFAULTS: MicroExpertConfig = {
   contextSize: 4096,
   threads: 0,
   recallTemplate: 'default',
+  mcpServers: {},
+  mcpMaxTools: 10,
 };
 
 /** Environment variable mapping (MICRO_EXPERT_ prefix) */
@@ -165,6 +172,7 @@ export function configSummary(config: MicroExpertConfig): string {
     `Recall limit:  ${config.recallLimit}`,
     `Recall template: ${config.recallTemplate}`,
     `Thinking mode: ${config.thinkingMode ? 'on' : 'off'}`,
+    `MCP servers:   ${Object.keys(config.mcpServers).length > 0 ? Object.keys(config.mcpServers).join(', ') : 'none'}`,
     `Memory store:  ${MEMORY_DIR}`,
   ].join('\n');
 }

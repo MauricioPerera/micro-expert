@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { AgentLoop } from '../src/agent/loop.js';
 import type { InferenceClient, ChatMessage, StreamDelta, ChatCompletionOptions } from '../src/inference/client.js';
 import type { MemoryProvider, RecallResult } from '../src/memory/provider.js';
+import type { McpClientManager } from '../src/mcp/index.js';
 import { loadConfig } from '../src/config.js';
 
 /** Create a mock inference client */
@@ -343,5 +344,142 @@ describe('AgentLoop', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  // --- MCP tool call tests ---
+
+  it('should process [MCP: tool_name {"arg": "val"}] tags', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([
+        { qualifiedName: 'read_file', serverName: 'fs', originalName: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } },
+      ]),
+      toSystemPromptSection: vi.fn().mockReturnValue('To use external tools, write [MCP: tool_name {"param": "value"}].\nMCP tools:\n- read_file: Read a file'),
+      callTool: vi.fn().mockResolvedValue('file contents here'),
+    } as unknown as McpClientManager;
+
+    const inference = mockInferenceClient('Contents: [MCP: read_file {"path": "/tmp/test.txt"}]');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    const result = await agent.run({
+      message: 'Read the file',
+      userId: 'test-user',
+    });
+
+    expect(result.content).toBe('Contents: file contents here');
+    expect(result.content).not.toContain('[MCP:');
+    expect(mockMcp.callTool).toHaveBeenCalledWith('read_file', { path: '/tmp/test.txt' });
+  });
+
+  it('should include MCP tool instructions in system prompt', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([
+        { qualifiedName: 'test_tool', serverName: 'test', originalName: 'test_tool', description: 'A test tool', inputSchema: { type: 'object' } },
+      ]),
+      toSystemPromptSection: vi.fn().mockReturnValue('To use external tools, write [MCP: tool_name {"param": "value"}].\nMCP tools:\n- test_tool: A test tool'),
+      callTool: vi.fn(),
+    } as unknown as McpClientManager;
+
+    const inference = mockInferenceClient('Sure!');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    await agent.run({ message: 'Hello', userId: 'test-user' });
+
+    const callArgs = (inference.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+    const messages = callArgs[0] as ChatMessage[];
+    const systemMsg = messages.find(m => m.role === 'system');
+
+    expect(systemMsg!.content).toContain('[MCP: tool_name');
+    expect(systemMsg!.content).toContain('test_tool');
+  });
+
+  it('should handle invalid JSON args in MCP tag', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([
+        { qualifiedName: 'tool1', serverName: 'test', originalName: 'tool1', description: 'A tool', inputSchema: { type: 'object' } },
+      ]),
+      toSystemPromptSection: vi.fn().mockReturnValue(''),
+      callTool: vi.fn(),
+    } as unknown as McpClientManager;
+
+    const inference = mockInferenceClient('Result: [MCP: tool1 {invalid json}]');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    const result = await agent.run({ message: 'Test', userId: 'test-user' });
+
+    expect(result.content).toContain('[error:');
+    expect(result.content).not.toContain('[MCP:');
+    expect(mockMcp.callTool).not.toHaveBeenCalled();
+  });
+
+  it('should handle MCP tool execution error', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([
+        { qualifiedName: 'failing', serverName: 'test', originalName: 'failing', description: 'Fails', inputSchema: { type: 'object' } },
+      ]),
+      toSystemPromptSection: vi.fn().mockReturnValue(''),
+      callTool: vi.fn().mockRejectedValue(new Error('Tool execution failed')),
+    } as unknown as McpClientManager;
+
+    const inference = mockInferenceClient('Result: [MCP: failing {}]');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    const result = await agent.run({ message: 'Test', userId: 'test-user' });
+
+    expect(result.content).toContain('[error: Tool execution failed]');
+    expect(result.content).not.toContain('[MCP:');
+  });
+
+  it('should process mixed CALC, FETCH, and MCP tags', async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('api-data'));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      body: stream,
+    } as unknown as Response);
+
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([
+        { qualifiedName: 'greet', serverName: 'test', originalName: 'greet', description: 'Greet', inputSchema: { type: 'object' } },
+      ]),
+      toSystemPromptSection: vi.fn().mockReturnValue(''),
+      callTool: vi.fn().mockResolvedValue('Hi there!'),
+    } as unknown as McpClientManager;
+
+    try {
+      const inference = mockInferenceClient('Math: [CALC: 3 * 3], API: [FETCH: GET https://api.example.com/x], MCP: [MCP: greet {"name": "World"}]');
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+      const result = await agent.run({ message: 'All three', userId: 'test-user' });
+
+      expect(result.content).toContain('Math: 9');
+      expect(result.content).toContain('HTTP 200');
+      expect(result.content).toContain('MCP: Hi there!');
+      expect(result.content).not.toContain('[CALC:');
+      expect(result.content).not.toContain('[FETCH:');
+      expect(result.content).not.toContain('[MCP:');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should work without MCP manager (backwards compatibility)', async () => {
+    const inference = mockInferenceClient('No MCP here');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config); // no mcp param
+
+    const result = await agent.run({ message: 'Hello', userId: 'test-user' });
+
+    expect(result.content).toBe('No MCP here');
   });
 });

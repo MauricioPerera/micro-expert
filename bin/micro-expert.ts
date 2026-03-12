@@ -7,6 +7,7 @@ import { InferenceManager } from '../src/inference/manager.js';
 import { InferenceClient } from '../src/inference/client.js';
 import { AgentLoop } from '../src/agent/loop.js';
 import { ToolRegistry, registerBuiltinTools } from '../src/agent/tools.js';
+import { McpClientManager } from '../src/mcp/index.js';
 import { createServer } from '../src/server/http.js';
 import { runSetup } from '../src/setup/wizard.js';
 
@@ -54,7 +55,7 @@ program
       port: globalOpts.port,
     });
 
-    const { memory, agent, inference } = initComponents(config);
+    const { memory, agent, inference, mcp } = await initComponents(config);
 
     const server = createServer({ agent, memory, inference, config });
 
@@ -70,6 +71,7 @@ program
     // Graceful shutdown
     const shutdown = () => {
       console.log('\n[micro-expert] Shutting down...');
+      mcp?.disconnectAll().catch(() => {});
       inference.stop();
       memory.dispose();
       server.close();
@@ -90,7 +92,7 @@ program
       modelPath: globalOpts.model,
     });
 
-    const { memory, agent, inference } = initComponents(config);
+    const { memory, agent, inference, mcp } = await initComponents(config);
 
     console.log('🧠 MicroExpert Chat (type "exit" to quit)\n');
 
@@ -104,6 +106,7 @@ program
       rl.question('You: ', async (input) => {
         const text = input.trim();
         if (!text || text === 'exit' || text === 'quit') {
+          await mcp?.disconnectAll().catch(() => {});
           inference.stop();
           memory.dispose();
           rl.close();
@@ -141,7 +144,7 @@ program
       modelPath: globalOpts.model,
     });
 
-    const { memory, agent, inference } = initComponents(config);
+    const { memory, agent, inference, mcp } = await initComponents(config);
 
     try {
       for await (const delta of agent.runStream({
@@ -155,6 +158,7 @@ program
       console.error(`Error: ${(e as Error).message}`);
       process.exitCode = 1;
     } finally {
+      await mcp?.disconnectAll().catch(() => {});
       inference.stop();
       memory.dispose();
     }
@@ -255,20 +259,84 @@ program
     }
   });
 
+// --- mcp-status ---
+program
+  .command('mcp-status')
+  .description('Show configured MCP servers and their available tools')
+  .action(async () => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const serverNames = Object.keys(config.mcpServers);
+
+    if (serverNames.length === 0) {
+      console.log('\nNo MCP servers configured.');
+      console.log('Add servers to ~/.micro-expert/config.json under "mcpServers".\n');
+      console.log('Example:');
+      console.log('  {');
+      console.log('    "mcpServers": {');
+      console.log('      "filesystem": {');
+      console.log('        "command": "npx",');
+      console.log('        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]');
+      console.log('      }');
+      console.log('    }');
+      console.log('  }\n');
+      return;
+    }
+
+    console.log(`\n🔌 MCP Servers (${serverNames.length}):\n`);
+
+    const mcp = new McpClientManager();
+    try {
+      await mcp.connectAll(config.mcpServers);
+      const tools = mcp.listTools();
+
+      for (const name of serverNames) {
+        const serverTools = tools.filter(t => t.serverName === name);
+        console.log(`  ${name}: ${serverTools.length} tool(s)`);
+        for (const t of serverTools) {
+          console.log(`    - ${t.qualifiedName}: ${t.description}`);
+        }
+      }
+
+      console.log(`\n  Total: ${tools.length} tool(s)\n`);
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      await mcp.disconnectAll();
+    }
+  });
+
 // --- Parse and run ---
 program.parse();
 
 // --- Helpers ---
 
-function initComponents(config: MicroExpertConfig) {
+async function initComponents(config: MicroExpertConfig) {
   const memory = new MemoryProvider(config);
   const inference = new InferenceManager(config);
   const client = new InferenceClient(inference);
   const tools = new ToolRegistry();
   registerBuiltinTools(tools, memory);
-  const agent = new AgentLoop(client, memory, config);
 
-  return { memory, inference, client, tools, agent };
+  // MCP client setup — connect to configured MCP servers
+  let mcp: McpClientManager | undefined;
+  const serverNames = Object.keys(config.mcpServers);
+  if (serverNames.length > 0) {
+    mcp = new McpClientManager();
+    await mcp.connectAll(config.mcpServers);
+    const mcpTools = mcp.listTools();
+    if (mcpTools.length > 0) {
+      console.log(`[micro-expert] MCP: connected ${mcpTools.length} tool(s) from ${serverNames.length} server(s)`);
+    }
+  }
+
+  const agent = new AgentLoop(client, memory, config, tools, mcp);
+
+  return { memory, inference, client, tools, agent, mcp };
 }
 
 function openBrowser(url: string): void {

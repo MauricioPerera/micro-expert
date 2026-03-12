@@ -2,6 +2,7 @@ import type { InferenceClient, ChatMessage, StreamDelta } from '../inference/cli
 import type { MemoryProvider } from '../memory/provider.js';
 import type { MicroExpertConfig } from '../config.js';
 import type { ToolRegistry } from './tools.js';
+import type { McpClientManager } from '../mcp/index.js';
 import { safeEvaluate } from './tools.js';
 import { parseFetchTag, executeFetch } from './http-tool.js';
 
@@ -40,17 +41,20 @@ export class AgentLoop {
   private readonly memory: MemoryProvider;
   private readonly config: MicroExpertConfig;
   private readonly tools?: ToolRegistry;
+  private readonly mcp?: McpClientManager;
 
   constructor(
     inference: InferenceClient,
     memory: MemoryProvider,
     config: MicroExpertConfig,
     tools?: ToolRegistry,
+    mcp?: McpClientManager,
   ) {
     this.inference = inference;
     this.memory = memory;
     this.config = config;
     this.tools = tools;
+    this.mcp = mcp;
   }
 
   /**
@@ -123,6 +127,7 @@ export class AgentLoop {
    * Patterns:
    *   [CALC: expression] → numeric result
    *   [FETCH: METHOD url ...] → HTTP response body
+   *   [MCP: tool_name {"arg": "val"}] → MCP tool result
    * If execution fails, replaced with [error: message].
    */
   private async processToolCalls(content: string): Promise<string> {
@@ -138,12 +143,12 @@ export class AgentLoop {
 
     // 2. Process FETCH tags (async — must handle sequentially)
     const fetchRegex = /\[FETCH:\s*([\s\S]*?)\]/g;
-    const matches = [...content.matchAll(fetchRegex)];
+    const fetchMatches = [...content.matchAll(fetchRegex)];
 
-    if (matches.length > 0) {
+    if (fetchMatches.length > 0) {
       // Process from last to first to preserve indices
-      for (let i = matches.length - 1; i >= 0; i--) {
-        const match = matches[i];
+      for (let i = fetchMatches.length - 1; i >= 0; i--) {
+        const match = fetchMatches[i];
         const raw = match[1];
         const start = match.index!;
         const end = start + match[0].length;
@@ -157,6 +162,32 @@ export class AgentLoop {
         }
 
         content = content.slice(0, start) + replacement + content.slice(end);
+      }
+    }
+
+    // 3. Process MCP tags (async — external tool calls via MCP protocol)
+    if (this.mcp) {
+      const mcpRegex = /\[MCP:\s*(\S+)\s+([\s\S]*?)\]/g;
+      const mcpMatches = [...content.matchAll(mcpRegex)];
+
+      if (mcpMatches.length > 0) {
+        for (let i = mcpMatches.length - 1; i >= 0; i--) {
+          const match = mcpMatches[i];
+          const toolName = match[1];
+          const argsRaw = match[2].trim();
+          const start = match.index!;
+          const end = start + match[0].length;
+
+          let replacement: string;
+          try {
+            const args = argsRaw ? JSON.parse(argsRaw) : {};
+            replacement = await this.mcp.callTool(toolName, args);
+          } catch (e) {
+            replacement = `[error: ${(e as Error).message}]`;
+          }
+
+          content = content.slice(0, start) + replacement + content.slice(end);
+        }
       }
     }
 
@@ -183,11 +214,18 @@ export class AgentLoop {
     const calcInstruction = 'To perform calculations, write [CALC: expression]. Example: [CALC: 15 * 3 + 7]';
     const fetchInstruction = 'To fetch data from the web, write [FETCH: GET url]. For POST: [FETCH:\\nPOST url\\nBody: {"key":"value"}]';
 
+    // MCP tool instructions (only if MCP tools are available)
+    const mcpInstruction = this.mcp ? this.mcp.toSystemPromptSection(this.config.mcpMaxTools) : '';
+
     if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
-      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
+      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}`;
+      if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
+      systemContent += '\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.';
     } else {
-      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\n${fetchInstruction}\nAnswer concisely and accurately.`;
+      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\n${fetchInstruction}`;
+      if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
+      systemContent += '\nAnswer concisely and accurately.';
     }
 
     messages.push({ role: 'system', content: systemContent });

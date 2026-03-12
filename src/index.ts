@@ -5,4 +5,6 @@ export { InferenceManager } from './inference/manager.js';
 export { InferenceClient } from './inference/client.js';
 export { AgentLoop } from './agent/loop.js';
 export { ToolRegistry } from './agent/tools.js';
+export { McpClientManager } from './mcp/index.js';
+export type { McpServerConfig, McpToolInfo } from './mcp/index.js';
 export { createServer } from './server/http.js';
