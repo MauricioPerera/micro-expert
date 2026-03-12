@@ -54,6 +54,12 @@ Key design decisions:
 - SDK SSE/StreamableHTTP transports hang on Windows — `HttpMcpClient` reads first SSE event and destroys stream
 - MCP servers configured in `~/.micro-expert/config.json` under `mcpServers` (same format as claude_desktop_config.json)
 - Memory import/export via API endpoints and CLI commands
+- Thinking mode: Qwen3.5 emits `<think>...</think>` blocks; disabled by default via `/no_think` in system prompt
+- `stripThinkingTokens()` in `loop.ts` removes thinking blocks from non-streaming responses
+- `stripThinking()` in `index.html` removes thinking blocks client-side during streaming
+- Vision support: `image` field in AgentRequest sends base64 data URL as `image_url` content part
+- Security: 1MB body limit in `readBody()`, 5min SSE timeout, config validation, promise mutex in InferenceManager
+- Transient error retry: `isTransientError()` in `client.ts` catches ECONNREFUSED/ECONNRESET/socket hang up
 
 ## Conventions
 

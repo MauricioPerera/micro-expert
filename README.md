@@ -180,6 +180,12 @@ Run the code tool with input "hello"
 
 All three tag types can appear in the same response and are processed sequentially (CALC → FETCH → MCP).
 
+### Vision — Image Input
+
+The Web UI supports attaching images via the 📎 button. Images are sent as base64 data URLs in the `image` field of the chat completion request. The model receives them as `image_url` content parts (requires a vision-capable GGUF model).
+
+> **Note**: Not all sub-1B models support vision. Qwen2.5 and Qwen3.5 text-only models will ignore image inputs.
+
 ---
 
 ## MCP Integration
@@ -256,7 +262,7 @@ curl -X POST http://127.0.0.1:3333/v1/chat/completions \
   }'
 ```
 
-Supports `"stream": true` for Server-Sent Events (SSE) streaming.
+Supports `"stream": true` for Server-Sent Events (SSE) streaming. Optional `"image"` field accepts a base64 data URL for vision models.
 
 ### `GET /health`
 
@@ -462,7 +468,34 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | Model | Size | Use case |
 |---|---|---|
 | **Qwen2.5-0.5B-Instruct** (Q4_K_M) | ~469 MB | Default — good balance of quality and speed |
+| **Qwen3.5-0.8B** (Q4_K_M) | ~508 MB | Upgrade option — better reasoning, supports thinking mode |
 | **Gemma 3 270M** (Q4_K_M) | ~170 MB | `--light` — minimal footprint, faster inference |
+
+### Thinking Mode (Qwen3.5)
+
+Qwen3.5 supports a "thinking mode" where the model emits `<think>...</think>` blocks with internal reasoning before the actual response. This is **disabled by default** (`thinkingMode: false`) because:
+
+- It significantly increases response time and token usage
+- Sub-1B models produce low-quality reasoning that rarely helps
+- Thinking tokens can interfere with tag-based tool calling (the model may solve the problem internally and emit pre-computed results instead of proper `[CALC: ...]` tags)
+
+When disabled, MicroExpert injects `/no_think` into the system prompt (Qwen3.5-specific directive). As a safety net, thinking tokens are also stripped both server-side (non-streaming) and client-side (streaming UI), since the model may still emit them occasionally.
+
+To enable: set `"thinkingMode": true` in config or `MICRO_EXPERT_THINKING=true`.
+
+---
+
+## Security
+
+MicroExpert includes several safety measures for local operation:
+
+- **Request body limit** — 1 MB max on all API requests (DoS prevention)
+- **SSE timeout** — 5-minute inactivity timeout on streaming connections
+- **FETCH tool restrictions** — Blocked hosts (localhost, loopback, private IPs), blocked schemes (file://, ftp://, data:), 10s timeout, 32 KB response limit, 2048 char result truncation
+- **Config validation** — Port (1-65535), temperature (0-2), threads (≥0), maxTokens (≥1), contextSize (≥128) validated on load with fallback to defaults
+- **Safe math evaluator** — Recursive descent parser for `[CALC:]` tags — no `eval()`, no code execution
+- **Memory import validation** — Payload structure validated before processing
+- **Inference retry** — Detects transient errors (ECONNREFUSED, socket hang up, etc.) with automatic retry on llama-server restart races
 
 ---
 
