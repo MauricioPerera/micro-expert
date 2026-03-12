@@ -34,33 +34,38 @@ Both approaches prove that context-as-training works. MicroExpert is designed fo
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│                 MicroExpert                   │
-│                                               │
-│  ┌─────────────┐  ┌────────────────────────┐ │
-│  │   Web UI     │  │         CLI            │ │
-│  │  (vanilla)   │  │  setup·serve·chat·ask  │ │
-│  └──────┬───────┘  └───────────┬────────────┘ │
-│         │                      │              │
-│         ▼                      ▼              │
-│  ┌────────────────────────────────────────┐   │
-│  │            Agent Loop                  │   │
-│  │  recall → build prompt → infer → save  │   │
-│  └──────────┬──────────────┬──────────────┘   │
-│             │              │                  │
-│  ┌──────────▼───────┐  ┌──▼───────────────┐  │
-│  │   RepoMemory     │  │  llama-server    │  │
-│  │   (embedded)     │  │  (child_process) │  │
-│  │                  │  │                  │  │
-│  │  · SHA-256 store │  │  · on-demand     │  │
-│  │  · hybrid recall │  │  · idle timeout  │  │
-│  │  · profiles      │  │  · GGUF models   │  │
-│  │  · correction    │  │  · auto-retry    │  │
-│  │    boost         │  │                  │  │
-│  └──────────────────┘  └──────────────────┘  │
-│                                               │
-└──────────────────────────────────────────────┘
-         Single Node.js process
+┌───────────────────────────────────────────────────────────┐
+│                      MicroExpert                          │
+│                                                           │
+│  ┌─────────────┐  ┌────────────────────────────────────┐  │
+│  │   Web UI     │  │              CLI                   │  │
+│  │  (vanilla)   │  │  setup·serve·chat·ask·mcp-status   │  │
+│  └──────┬───────┘  └──────────────┬─────────────────────┘  │
+│         │                         │                        │
+│         ▼                         ▼                        │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                  Agent Loop                         │   │
+│  │  recall → build prompt → infer → tool calls → save  │   │
+│  │                                                     │   │
+│  │  Tools: [CALC: expr]  [FETCH: METHOD url]           │   │
+│  │         [MCP: tool_name {"args"}]                   │   │
+│  └──────┬──────────────┬──────────────┬────────────────┘   │
+│         │              │              │                     │
+│  ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼─────────────────┐  │
+│  │ RepoMemory  │ │llama-server│ │    MCP Client         │  │
+│  │ (embedded)  │ │(child_proc)│ │                       │  │
+│  │             │ │            │ │ · stdio (SDK)         │  │
+│  │ · SHA-256   │ │ · on-demand│ │ · HTTP/SSE (custom)   │  │
+│  │ · hybrid    │ │ · idle     │ │ · auto-detect         │  │
+│  │   recall    │ │   timeout  │ │   transport           │  │
+│  │ · profiles  │ │ · GGUF     │ │                       │  │
+│  │ · correction│ │ · retry    │ │  ┌─────┐ ┌─────────┐  │  │
+│  │   boost     │ │            │ │  │ n8n │ │filesys  │  │  │
+│  └─────────────┘ └────────────┘ │  └─────┘ └─────────┘  │  │
+│                                 └────────────────────────┘  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                  Single Node.js process
 ```
 
 Everything runs in a **single Node.js process**. RepoMemory is embedded — no separate server, no database to manage. `llama-server` is spawned on demand as a child process and auto-stops after an idle timeout (default 300s) to free RAM.
@@ -100,6 +105,9 @@ node dist/bin/micro-expert.js ask "What is my name?"
 
 # Check status
 node dist/bin/micro-expert.js status
+
+# Check MCP tool availability
+node dist/bin/micro-expert.js mcp-status
 ```
 
 After `npm install -g`, you can use `micro-expert` directly:
@@ -109,6 +117,7 @@ micro-expert serve
 micro-expert chat
 micro-expert ask "How does authentication work?"
 micro-expert status
+micro-expert mcp-status
 ```
 
 ---
@@ -122,6 +131,7 @@ micro-expert status
 | `micro-expert chat` | Interactive terminal chat with streaming output |
 | `micro-expert ask <query>` | One-shot question, prints answer and exits |
 | `micro-expert status` | Show model info, memory stats, config summary |
+| `micro-expert mcp-status` | Connect to all configured MCP servers, list available tools, disconnect |
 
 ### CLI Flags
 
@@ -131,6 +141,103 @@ micro-expert status
 | `--model <path>` | Path to GGUF model file | `~/.micro-expert/models/model.gguf` |
 | `--light` | Use lightweight model (Gemma 3 270M) during setup | `false` |
 | `--no-open` | Don't open browser on `serve` | `false` |
+
+---
+
+## Tool Calling
+
+Sub-1B models can't do native function calling, so MicroExpert uses a **tag-based format**. The model emits tags in its response, the agent loop detects and executes them, and replaces each tag with the result before returning the final answer.
+
+### Calculator — `[CALC: expr]`
+
+Safe math evaluator using a recursive descent parser (no `eval()`). Supports arithmetic, parentheses, and common functions (`sqrt`, `sin`, `cos`, `abs`, `log`, `pow`, `round`, `ceil`, `floor`, `min`, `max`).
+
+```
+What's the square root of 144?
+→ Model outputs: The answer is [CALC: sqrt(144)]
+→ Agent replaces: The answer is 12
+```
+
+### HTTP Fetch — `[FETCH: METHOD url]`
+
+Makes HTTP requests with security controls: blocked internal hosts, request timeout, response size limits (2048 chars).
+
+```
+What's the weather API response?
+→ Model outputs: [FETCH: GET https://api.example.com/weather]
+→ Agent replaces with the response body (truncated to 2048 chars)
+```
+
+### MCP Tools — `[MCP: tool_name {"args"}]`
+
+Calls tools from external MCP servers. See the [MCP Integration](#mcp-integration) section below.
+
+```
+Run the code tool with input "hello"
+→ Model outputs: [MCP: Code_Tool {"input": "hello"}]
+→ Agent replaces with the tool's result
+```
+
+All three tag types can appear in the same response and are processed sequentially (CALC → FETCH → MCP).
+
+---
+
+## MCP Integration
+
+MicroExpert acts as an **MCP client** — it connects to external MCP servers and exposes their tools to the model via `[MCP: ...]` tags.
+
+### Supported Transports
+
+| Transport | Config field | Use case |
+|---|---|---|
+| **stdio** | `command` + `args` | Local CLI-based MCP servers (e.g., `@modelcontextprotocol/server-filesystem`) |
+| **HTTP/SSE** | `url` | Remote MCP servers that speak Streamable HTTP/SSE (e.g., n8n, custom servers) |
+
+Transport is **auto-detected**: if the config has a `url` field → HTTP, if it has a `command` field → stdio.
+
+> **Note**: The official SDK transports (`SSEClientTransport`, `StreamableHTTPClientTransport`) hang on Windows due to SSE stream handling. MicroExpert uses a custom `HttpMcpClient` built on `node:http` that reads the first SSE event and destroys the stream.
+
+### Configuration
+
+Add MCP servers to `~/.micro-expert/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "url": "http://localhost:5678/mcp/YOUR-WORKFLOW-UUID",
+      "headers": {
+        "Authorization": "Bearer your-token"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  },
+  "mcpMaxTools": 10
+}
+```
+
+| Field | Description |
+|---|---|
+| `url` | HTTP/SSE endpoint URL (triggers HTTP transport) |
+| `command` | Executable to run (triggers stdio transport) |
+| `args` | Arguments for the command |
+| `env` | Environment variables for the subprocess |
+| `headers` | Custom HTTP headers (e.g., `Authorization`) — HTTP transport only |
+
+### How it works
+
+1. On startup, `McpClientManager` connects to all configured servers
+2. Each server's tools are discovered and registered
+3. Tool descriptions are injected into the system prompt (compact format for sub-1B models)
+4. When the model emits `[MCP: tool_name {"args"}]`, the agent calls the appropriate server
+5. Results are serialized to text and replace the tag in the response
+
+### Tool limit
+
+Default `mcpMaxTools: 10` — limits the number of tool descriptions injected into the prompt. Sub-1B models have small context windows; too many tools degrade response quality.
 
 ---
 
@@ -166,6 +273,26 @@ List conversation sessions.
 ### `GET /history/:sessionId`
 
 Get a specific conversation session with messages.
+
+### `POST /memory/export`
+
+Export memories as JSON. Accepts optional filters:
+
+```bash
+curl -X POST http://127.0.0.1:3333/memory/export \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "local", "category": "general"}'
+```
+
+### `POST /memory/import`
+
+Import memories from a previous export:
+
+```bash
+curl -X POST http://127.0.0.1:3333/memory/import \
+  -H "Content-Type: application/json" \
+  -d '{"memories": [...]}'
+```
 
 ---
 
@@ -206,7 +333,9 @@ Config priority: **CLI args > env vars > config file > defaults**
   "contextBudget": 4096,
   "thinkingMode": false,
   "recallTemplate": "default",
-  "threads": 0
+  "threads": 0,
+  "mcpServers": {},
+  "mcpMaxTools": 10
 }
 ```
 
@@ -236,33 +365,42 @@ All use the `MICRO_EXPERT_` prefix:
 ```
 micro-expert/
 ├── bin/
-│   └── micro-expert.ts          # CLI entry point (commander)
+│   └── micro-expert.ts              # CLI entry point (commander)
 ├── src/
-│   ├── index.ts                 # Public API exports
-│   ├── config.ts                # Config loading (defaults + env + file + CLI)
+│   ├── index.ts                     # Public API exports
+│   ├── config.ts                    # Config loading (defaults + env + file + CLI)
 │   ├── agent/
-│   │   ├── loop.ts              # Core pipeline: recall → prompt → infer → save
-│   │   └── tools.ts             # Tool registry (recall, search, save_memory)
+│   │   ├── loop.ts                  # Core pipeline: recall → prompt → infer → tools → save
+│   │   ├── tools.ts                 # Tool registry (recall, search, save_memory)
+│   │   └── http-tool.ts            # FETCH tag: HTTP requests with security controls
 │   ├── inference/
-│   │   ├── manager.ts           # llama-server lifecycle (spawn, health, idle)
-│   │   └── client.ts            # HTTP client for llama-server (+ SSE streaming)
+│   │   ├── manager.ts               # llama-server lifecycle (spawn, health, idle)
+│   │   └── client.ts               # HTTP client for llama-server (+ SSE streaming)
+│   ├── mcp/
+│   │   ├── index.ts                 # MCP exports
+│   │   ├── client.ts               # McpClientManager: stdio + HTTP dual transport
+│   │   └── http-transport.ts       # Custom HttpMcpClient (bypasses SDK hang on Windows)
 │   ├── memory/
-│   │   └── provider.ts          # RepoMemory embedded wrapper
+│   │   └── provider.ts             # RepoMemory embedded wrapper
 │   ├── server/
-│   │   ├── http.ts              # node:http server (API + UI serving)
-│   │   └── routes.ts            # API route handlers
+│   │   ├── http.ts                  # node:http server (API + UI serving)
+│   │   └── routes.ts               # API route handlers
 │   ├── setup/
-│   │   └── wizard.ts            # Setup wizard (download model + llama-server)
+│   │   └── wizard.ts               # Setup wizard (download model + llama-server)
 │   └── ui/
-│       └── index.html           # Web UI SPA (vanilla HTML/CSS/JS, ~15KB)
+│       └── index.html               # Web UI SPA (vanilla HTML/CSS/JS, ~15KB)
 ├── tests/
-│   ├── config.test.ts           # Config loading tests (5 tests)
-│   ├── memory-provider.test.ts  # Memory operations tests (6 tests)
-│   └── agent-loop.test.ts       # Agent pipeline tests (4 tests)
+│   ├── config.test.ts               # Config loading (5 tests)
+│   ├── memory-provider.test.ts      # Memory operations (6 tests)
+│   ├── agent-loop.test.ts           # Agent pipeline + tool calls (20 tests)
+│   ├── calculator.test.ts           # Safe math evaluator (24 tests)
+│   ├── http-tool.test.ts            # FETCH tag parsing + security (32 tests)
+│   ├── memory-export.test.ts        # Export/import round-trip (8 tests)
+│   └── mcp-client.test.ts          # MCP client: stdio + HTTP (20 tests)
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts
-├── CLAUDE.md                    # Instructions for Claude Code
+├── CLAUDE.md
 └── README.md
 ```
 
@@ -275,7 +413,7 @@ git clone https://github.com/MauricioPerera/micro-expert.git
 cd micro-expert
 npm install
 npm run build       # Compile TypeScript + copy UI assets
-npm test            # Run all 15 tests
+npm test            # Run all 115 tests (7 suites)
 npm run dev         # TypeScript watch mode
 npm start           # Start server (micro-expert serve)
 ```
@@ -287,7 +425,7 @@ npm test              # Run once
 npm run test:watch    # Watch mode
 ```
 
-Tests use vitest with mocks for inference and real RepoMemory instances for memory tests.
+Tests use vitest with mocks for inference and real RepoMemory instances for memory tests. MCP tests mock both SDK transports and the custom HttpMcpClient.
 
 ---
 
@@ -297,7 +435,7 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 |---|---|
 | `~/.micro-expert/` | All user data (created on first run) |
 | `~/.micro-expert/memory/` | RepoMemory content-addressable store |
-| `~/.micro-expert/config.json` | User configuration |
+| `~/.micro-expert/config.json` | User configuration (including MCP servers) |
 | `~/.micro-expert/bin/llama-server` | Downloaded llama-server binary |
 | `~/.micro-expert/models/model.gguf` | Default GGUF model file |
 
@@ -312,8 +450,9 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | **HTTP** | `node:http` (no Express) |
 | **Memory** | `@rckflr/repomemory` (embedded, no separate server) |
 | **Inference** | `llama-server` from llama.cpp (spawned on-demand) |
+| **MCP** | `@modelcontextprotocol/sdk` (stdio) + custom `HttpMcpClient` (HTTP/SSE) |
 | **CLI** | `commander` |
-| **Tests** | `vitest` (15 tests across 3 suites) |
+| **Tests** | `vitest` (115 tests across 7 suites) |
 | **Frontend** | Vanilla HTML/CSS/JS (zero dependencies, ~15KB) |
 
 ---
@@ -333,7 +472,6 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 - [ ] MCP server mode — expose as a tool for Claude Code, Cursor, etc.
 - [ ] Auto-mining — automatically extract memories from sessions during idle time
 - [ ] Multi-model support — swap models per task type
-- [ ] Memory export/import — share curated memory across machines
 - [ ] Metrics dashboard — visualize memory growth, recall accuracy, correction rate
 
 ---
