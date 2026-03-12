@@ -79,11 +79,15 @@ export class AgentLoop {
     // 3.5. Process tool calls (e.g., [CALC: 2+3] → 5, [FETCH: GET url] → response)
     content = await this.processToolCalls(content);
 
-    // 4. Save session (fire and forget)
+    // 4. Save session
     const sessionId = this.memory.saveSession(request.userId, [
       { role: 'user', content: request.message },
       { role: 'assistant', content },
     ]);
+
+    if (!sessionId) {
+      console.warn('[micro-expert] Failed to save session — response was still returned to user');
+    }
 
     return {
       content,
@@ -116,10 +120,14 @@ export class AgentLoop {
     }
 
     // 4. Save session after stream completes
-    this.memory.saveSession(request.userId, [
+    const streamSessionId = this.memory.saveSession(request.userId, [
       { role: 'user', content: request.message },
       { role: 'assistant', content: fullContent },
     ]);
+
+    if (!streamSessionId) {
+      console.warn('[micro-expert] Failed to save streaming session');
+    }
   }
 
   /**

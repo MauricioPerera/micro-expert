@@ -10,7 +10,7 @@ export class InferenceManager {
   private process: ChildProcess | null = null;
   private _port = 0;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private starting = false;
+  private startPromise: Promise<number> | null = null;
   private readonly config: MicroExpertConfig;
 
   constructor(config: MicroExpertConfig) {
@@ -35,22 +35,26 @@ export class InferenceManager {
       return this._port;
     }
 
-    if (this.starting) {
-      // Wait for in-progress start
-      return this.waitForHealth();
+    if (this.startPromise) {
+      // Another call is already starting the server — wait for it
+      return this.startPromise;
     }
 
-    this.starting = true;
+    this.startPromise = this.doStart();
+    return this.startPromise;
+  }
+
+  private async doStart(): Promise<number> {
 
     if (!existsSync(this.config.llamaServerPath)) {
-      this.starting = false;
+      this.startPromise = null;
       throw new Error(
         `llama-server not found at ${this.config.llamaServerPath}. Run 'micro-expert setup' first.`
       );
     }
 
     if (!existsSync(this.config.modelPath)) {
-      this.starting = false;
+      this.startPromise = null;
       throw new Error(
         `Model not found at ${this.config.modelPath}. Run 'micro-expert setup' first.`
       );
@@ -84,7 +88,7 @@ export class InferenceManager {
     this.process.on('exit', (code) => {
       console.log(`[micro-expert] llama-server exited with code ${code}`);
       this.process = null;
-      this.starting = false;
+      this.startPromise = null;
       this.clearIdleTimer();
     });
 
@@ -102,11 +106,11 @@ export class InferenceManager {
     try {
       await this.waitForHealth();
       console.log(`[micro-expert] llama-server ready on port ${this._port}`);
-      this.starting = false;
+      this.startPromise = null;
       this.resetIdleTimer();
       return this._port;
     } catch (e) {
-      this.starting = false;
+      this.startPromise = null;
       this.stop();
       throw e;
     }

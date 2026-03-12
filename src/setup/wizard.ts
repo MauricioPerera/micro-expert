@@ -67,11 +67,14 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   } else if (options.llamaServerPath) {
     console.log(`✓ Using provided llama-server: ${serverPath}`);
   } else {
-    console.log('\n⚠ llama-server binary not found.');
-    console.log('  Please download it manually from:');
-    console.log('  https://github.com/ggerganov/llama.cpp/releases');
-    console.log(`  And place it at: ${serverPath}`);
-    console.log('  Or pass --llama-server-path /path/to/llama-server\n');
+    console.error('\n✗ llama-server binary not found.');
+    console.error('  Please download it manually from:');
+    console.error('  https://github.com/ggerganov/llama.cpp/releases');
+    console.error(`  And place it at: ${serverPath}`);
+    console.error('  Or pass --llama-server-path /path/to/llama-server\n');
+    throw new Error(
+      `llama-server not found. Download from https://github.com/ggerganov/llama.cpp/releases and place at ${serverPath}, or use --llama-server-path`
+    );
   }
 
   // 3. Model

@@ -134,8 +134,17 @@ async function handleChatCompletion(
 
     const id = `chatcmpl-${Date.now()}`;
 
+    // Timeout SSE connections after 5 minutes of inactivity
+    const SSE_TIMEOUT_MS = 5 * 60 * 1000;
+    let sseTimer = setTimeout(() => res.end(), SSE_TIMEOUT_MS);
+    const resetSseTimer = () => {
+      clearTimeout(sseTimer);
+      sseTimer = setTimeout(() => res.end(), SSE_TIMEOUT_MS);
+    };
+
     try {
       for await (const delta of ctx.agent.runStream(request)) {
+        resetSseTimer();
         const chunk = {
           id,
           object: 'chat.completion.chunk',
@@ -154,6 +163,7 @@ async function handleChatCompletion(
       res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
     }
 
+    clearTimeout(sseTimer);
     res.end();
   } else {
     // Non-streaming
@@ -262,6 +272,12 @@ async function handleMemoryImport(
     return true;
   }
 
+  // Validate required fields before passing to importMemories
+  if (typeof data.version !== 'number' || !Array.isArray(data.memories)) {
+    sendError(res, 400, 'Invalid import format: requires "version" (number) and "memories" (array)');
+    return true;
+  }
+
   try {
     const result = ctx.memory.importMemories(userId, data as unknown as import('../memory/provider.js').MemoryExportFile);
     sendJson(res, result);
@@ -274,10 +290,20 @@ async function handleMemoryImport(
 
 // --- Helpers ---
 
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on('data', (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_BYTES) {
+        req.destroy(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });

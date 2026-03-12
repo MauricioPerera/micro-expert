@@ -135,12 +135,36 @@ export function loadConfig(cliOverrides: Partial<MicroExpertConfig> = {}): Micro
   const fileConfig = loadConfigFile();
   const envConfig = loadEnvVars();
 
-  return {
+  const config = {
     ...DEFAULTS,
     ...fileConfig,
     ...envConfig,
     ...stripUndefined(cliOverrides),
   };
+
+  // Validate ranges
+  if (config.port < 1 || config.port > 65535) {
+    console.warn(`[micro-expert] Invalid port ${config.port}, using default ${DEFAULTS.port}`);
+    config.port = DEFAULTS.port;
+  }
+  if (config.temperature < 0 || config.temperature > 2) {
+    console.warn(`[micro-expert] Invalid temperature ${config.temperature}, using default ${DEFAULTS.temperature}`);
+    config.temperature = DEFAULTS.temperature;
+  }
+  if (config.threads < 0) {
+    console.warn(`[micro-expert] Invalid threads ${config.threads}, using default ${DEFAULTS.threads}`);
+    config.threads = DEFAULTS.threads;
+  }
+  if (config.maxTokens < 1) {
+    console.warn(`[micro-expert] Invalid maxTokens ${config.maxTokens}, using default ${DEFAULTS.maxTokens}`);
+    config.maxTokens = DEFAULTS.maxTokens;
+  }
+  if (config.contextSize < 128) {
+    console.warn(`[micro-expert] Invalid contextSize ${config.contextSize}, using default ${DEFAULTS.contextSize}`);
+    config.contextSize = DEFAULTS.contextSize;
+  }
+
+  return config;
 }
 
 /** Remove undefined values so they don't override lower-priority sources */

@@ -79,7 +79,7 @@ export class InferenceClient {
 
         return await res.json() as ChatCompletionResponse;
       } catch (e) {
-        if (attempt === 0 && (e as Error).message?.includes('fetch failed')) {
+        if (attempt === 0 && isTransientError(e as Error)) {
           console.log('[micro-expert] Inference request failed, retrying with server restart...');
           continue;
         }
@@ -119,7 +119,7 @@ export class InferenceClient {
       });
     } catch (e) {
       // Retry once on connection failure (idle timeout race)
-      if ((e as Error).message?.includes('fetch failed')) {
+      if (isTransientError(e as Error)) {
         console.log('[micro-expert] Stream request failed, retrying with server restart...');
         const retryPort = await this.manager.ensureRunning();
         this.manager.touch();
@@ -184,4 +184,16 @@ export class InferenceClient {
       reader.releaseLock();
     }
   }
+}
+
+/** Detect transient network errors that warrant a retry */
+function isTransientError(err: Error): boolean {
+  const msg = err.message ?? '';
+  return (
+    msg.includes('fetch failed') ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('socket hang up') ||
+    msg.includes('network socket disconnected')
+  );
 }

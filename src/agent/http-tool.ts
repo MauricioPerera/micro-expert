@@ -105,7 +105,7 @@ export function isUrlAllowed(url: string): boolean {
     return false;
   }
 
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = (parsed.hostname ?? '').toLowerCase();
 
   // Block known localhost names
   if (BLOCKED_HOSTS.has(hostname)) {
