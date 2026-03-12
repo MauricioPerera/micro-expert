@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.gguf
+.micro-expert/
+*.tsbuildinfo
+.env
+.DS_Store
+Thumbs.db

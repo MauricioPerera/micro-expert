@@ -1,0 +1,42 @@
+{
+  "name": "micro-expert",
+  "version": "0.1.0",
+  "description": "Local AI agent powered by sub-1B models and Context-Time Training (CTT)",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "bin": {
+    "micro-expert": "./dist/bin/micro-expert.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/bin/micro-expert.js serve",
+    "lint": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "local",
+    "llm",
+    "ctt",
+    "memory",
+    "llama.cpp"
+  ],
+  "author": "MauricioPerera",
+  "license": "MIT",
+  "dependencies": {
+    "@rckflr/repomemory": "^2.16.0",
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,170 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/** Base directory for all MicroExpert user data */
+export const MICRO_EXPERT_HOME = join(homedir(), '.micro-expert');
+export const MEMORY_DIR = join(MICRO_EXPERT_HOME, 'memory');
+export const MODELS_DIR = join(MICRO_EXPERT_HOME, 'models');
+export const BIN_DIR = join(MICRO_EXPERT_HOME, 'bin');
+export const CONFIG_FILE = join(MICRO_EXPERT_HOME, 'config.json');
+
+export interface MicroExpertConfig {
+  /** Path to the GGUF model file */
+  modelPath: string;
+  /** Path to llama-server binary */
+  llamaServerPath: string;
+  /** HTTP server port for the UI */
+  port: number;
+  /** HTTP server host */
+  host: string;
+  /** Agent ID for RepoMemory scoping */
+  agentId: string;
+  /** Default user ID when not specified */
+  defaultUserId: string;
+  /** Seconds of inactivity before stopping llama-server (0 = never) */
+  idleTimeout: number;
+  /** Default max tokens for generation */
+  maxTokens: number;
+  /** Default temperature */
+  temperature: number;
+  /** Default top_p */
+  topP: number;
+  /** Max items to recall from memory */
+  recallLimit: number;
+  /** Max chars for CTT context injection */
+  contextBudget: number;
+  /** Enable thinking mode (Qwen3.5) — off by default for stability */
+  thinkingMode: boolean;
+  /** Internal port for llama-server (auto-assigned if 0) */
+  llamaServerPort: number;
+  /** Context size for llama-server */
+  contextSize: number;
+  /** Number of CPU threads for inference (0 = auto) */
+  threads: number;
+  /** Recall template: default, technical, support, rag_focused */
+  recallTemplate: string;
+}
+
+const DEFAULTS: MicroExpertConfig = {
+  modelPath: join(MODELS_DIR, 'model.gguf'),
+  llamaServerPath: join(BIN_DIR, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'),
+  port: 3333,
+  host: '127.0.0.1',
+  agentId: 'micro-expert',
+  defaultUserId: 'local',
+  idleTimeout: 300,
+  maxTokens: 512,
+  temperature: 0.7,
+  topP: 0.9,
+  recallLimit: 5,
+  contextBudget: 4096,
+  thinkingMode: false,
+  llamaServerPort: 0,
+  contextSize: 4096,
+  threads: 0,
+  recallTemplate: 'default',
+};
+
+/** Environment variable mapping (MICRO_EXPERT_ prefix) */
+const ENV_MAP: Partial<Record<keyof MicroExpertConfig, string>> = {
+  modelPath: 'MICRO_EXPERT_MODEL_PATH',
+  llamaServerPath: 'MICRO_EXPERT_LLAMA_SERVER_PATH',
+  port: 'MICRO_EXPERT_PORT',
+  host: 'MICRO_EXPERT_HOST',
+  agentId: 'MICRO_EXPERT_AGENT_ID',
+  defaultUserId: 'MICRO_EXPERT_USER_ID',
+  idleTimeout: 'MICRO_EXPERT_IDLE_TIMEOUT',
+  maxTokens: 'MICRO_EXPERT_MAX_TOKENS',
+  temperature: 'MICRO_EXPERT_TEMPERATURE',
+  recallLimit: 'MICRO_EXPERT_RECALL_LIMIT',
+  contextBudget: 'MICRO_EXPERT_CONTEXT_BUDGET',
+  thinkingMode: 'MICRO_EXPERT_THINKING',
+  contextSize: 'MICRO_EXPERT_CONTEXT_SIZE',
+  threads: 'MICRO_EXPERT_THREADS',
+  recallTemplate: 'MICRO_EXPERT_RECALL_TEMPLATE',
+};
+
+/** Load config file if it exists */
+function loadConfigFile(): Partial<MicroExpertConfig> {
+  if (!existsSync(CONFIG_FILE)) return {};
+  try {
+    const raw = readFileSync(CONFIG_FILE, 'utf-8');
+    return JSON.parse(raw) as Partial<MicroExpertConfig>;
+  } catch {
+    console.error(`[micro-expert] Warning: Could not parse ${CONFIG_FILE}`);
+    return {};
+  }
+}
+
+/** Read environment variables into a partial config */
+function loadEnvVars(): Partial<MicroExpertConfig> {
+  const result: Partial<MicroExpertConfig> = {};
+
+  for (const [key, envName] of Object.entries(ENV_MAP)) {
+    const val = process.env[envName!];
+    if (val === undefined) continue;
+
+    const k = key as keyof MicroExpertConfig;
+    const defaultVal = DEFAULTS[k];
+
+    if (typeof defaultVal === 'number') {
+      const num = Number(val);
+      if (!isNaN(num)) (result as Record<string, unknown>)[k] = num;
+    } else if (typeof defaultVal === 'boolean') {
+      (result as Record<string, unknown>)[k] = val === '1' || val === 'true';
+    } else {
+      (result as Record<string, unknown>)[k] = val;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Build final config by merging: defaults < config file < env vars < CLI overrides.
+ */
+export function loadConfig(cliOverrides: Partial<MicroExpertConfig> = {}): MicroExpertConfig {
+  const fileConfig = loadConfigFile();
+  const envConfig = loadEnvVars();
+
+  return {
+    ...DEFAULTS,
+    ...fileConfig,
+    ...envConfig,
+    ...stripUndefined(cliOverrides),
+  };
+}
+
+/** Remove undefined values so they don't override lower-priority sources */
+function stripUndefined(obj: Partial<MicroExpertConfig>): Partial<MicroExpertConfig> {
+  const result: Partial<MicroExpertConfig> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) {
+      (result as Record<string, unknown>)[k] = v;
+    }
+  }
+  return result;
+}
+
+/** Get a human-readable summary of the current config */
+export function configSummary(config: MicroExpertConfig): string {
+  const modelExists = existsSync(config.modelPath);
+  const serverExists = existsSync(config.llamaServerPath);
+
+  return [
+    `Model:         ${config.modelPath} ${modelExists ? '✓' : '✗ not found'}`,
+    `llama-server:  ${config.llamaServerPath} ${serverExists ? '✓' : '✗ not found'}`,
+    `Server:        http://${config.host}:${config.port}`,
+    `Agent ID:      ${config.agentId}`,
+    `User ID:       ${config.defaultUserId}`,
+    `Idle timeout:  ${config.idleTimeout}s`,
+    `Max tokens:    ${config.maxTokens}`,
+    `Temperature:   ${config.temperature}`,
+    `Context size:  ${config.contextSize}`,
+    `Recall limit:  ${config.recallLimit}`,
+    `Recall template: ${config.recallTemplate}`,
+    `Thinking mode: ${config.thinkingMode ? 'on' : 'off'}`,
+    `Memory store:  ${MEMORY_DIR}`,
+  ].join('\n');
+}
