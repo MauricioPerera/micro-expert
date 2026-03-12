@@ -3,6 +3,7 @@ import type { MemoryProvider } from '../memory/provider.js';
 import type { MicroExpertConfig } from '../config.js';
 import type { ToolRegistry } from './tools.js';
 import { safeEvaluate } from './tools.js';
+import { parseFetchTag, executeFetch } from './http-tool.js';
 
 export interface AgentRequest {
   /** User's message */
@@ -71,8 +72,8 @@ export class AgentLoop {
 
     let content = response.choices[0]?.message?.content ?? '';
 
-    // 3.5. Process tool calls (e.g., [CALC: 2+3] → 5)
-    content = this.processToolCalls(content);
+    // 3.5. Process tool calls (e.g., [CALC: 2+3] → 5, [FETCH: GET url] → response)
+    content = await this.processToolCalls(content);
 
     // 4. Save session (fire and forget)
     const sessionId = this.memory.saveSession(request.userId, [
@@ -119,11 +120,14 @@ export class AgentLoop {
 
   /**
    * Detect and execute inline tool calls in the model's response.
-   * Pattern: [CALC: expression] → replaced with the numeric result.
-   * If evaluation fails, replaced with [error: message].
+   * Patterns:
+   *   [CALC: expression] → numeric result
+   *   [FETCH: METHOD url ...] → HTTP response body
+   * If execution fails, replaced with [error: message].
    */
-  private processToolCalls(content: string): string {
-    return content.replace(/\[CALC:\s*(.+?)\]/g, (_match, expr: string) => {
+  private async processToolCalls(content: string): Promise<string> {
+    // 1. Process CALC tags (synchronous)
+    content = content.replace(/\[CALC:\s*(.+?)\]/g, (_match, expr: string) => {
       try {
         const result = safeEvaluate(expr.trim());
         return String(result);
@@ -131,6 +135,32 @@ export class AgentLoop {
         return `[error: ${(e as Error).message}]`;
       }
     });
+
+    // 2. Process FETCH tags (async — must handle sequentially)
+    const fetchRegex = /\[FETCH:\s*([\s\S]*?)\]/g;
+    const matches = [...content.matchAll(fetchRegex)];
+
+    if (matches.length > 0) {
+      // Process from last to first to preserve indices
+      for (let i = matches.length - 1; i >= 0; i--) {
+        const match = matches[i];
+        const raw = match[1];
+        const start = match.index!;
+        const end = start + match[0].length;
+
+        let replacement: string;
+        try {
+          const request = parseFetchTag(raw);
+          replacement = await executeFetch(request);
+        } catch (e) {
+          replacement = `[error: ${(e as Error).message}]`;
+        }
+
+        content = content.slice(0, start) + replacement + content.slice(end);
+      }
+    }
+
+    return content;
   }
 
   /**
@@ -151,12 +181,13 @@ export class AgentLoop {
     const dateContext = `Current date: ${dateStr}. Current time: ${timeStr}.`;
 
     const calcInstruction = 'To perform calculations, write [CALC: expression]. Example: [CALC: 15 * 3 + 7]';
+    const fetchInstruction = 'To fetch data from the web, write [FETCH: GET url]. For POST: [FETCH:\\nPOST url\\nBody: {"key":"value"}]';
 
     if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
-      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
+      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
     } else {
-      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\nAnswer concisely and accurately.`;
+      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\n${fetchInstruction}\nAnswer concisely and accurately.`;
     }
 
     messages.push({ role: 'system', content: systemContent });

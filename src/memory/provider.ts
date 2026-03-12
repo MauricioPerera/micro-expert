@@ -20,6 +20,21 @@ export interface SessionSummary {
   preview: string;
 }
 
+export interface MemoryExportEntry {
+  content: string;
+  category: string;
+  tags: string[];
+}
+
+export interface MemoryExportFile {
+  version: number;
+  exportedAt: string;
+  userId: string;
+  agentId: string;
+  count: number;
+  memories: MemoryExportEntry[];
+}
+
 /**
  * Thin wrapper over RepoMemory embedded instance.
  * All memory operations go through here — no HTTP, no separate server.
@@ -198,6 +213,84 @@ export class MemoryProvider {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Export all memories for a user as a portable JSON structure.
+   */
+  exportMemories(userId: string): MemoryExportFile {
+    const memories: MemoryExportEntry[] = [];
+    const pageSize = 100;
+    let offset = 0;
+
+    // Paginate through all memories
+    while (true) {
+      const page = this.repo.memories.listPaginated(this.agentId, userId, {
+        limit: pageSize,
+        offset,
+      });
+
+      for (const mem of page.items) {
+        memories.push({
+          content: mem.content,
+          category: mem.category,
+          // Strip the auto-added 'micro-expert' tag for cleaner export
+          tags: mem.tags.filter(t => t !== 'micro-expert'),
+        });
+      }
+
+      if (!page.hasMore) break;
+      offset += pageSize;
+    }
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      userId,
+      agentId: this.agentId,
+      count: memories.length,
+      memories,
+    };
+  }
+
+  /**
+   * Import memories from a portable JSON structure.
+   * Returns counts of imported and failed entries.
+   */
+  importMemories(userId: string, data: MemoryExportFile): { imported: number; skipped: number; errors: number } {
+    if (data.version !== 1) {
+      throw new Error(`Unsupported export version: ${data.version}. Expected version 1.`);
+    }
+
+    if (!Array.isArray(data.memories)) {
+      throw new Error('Invalid export file: "memories" must be an array.');
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const entry of data.memories) {
+      // Validate entry
+      if (!entry.content || typeof entry.content !== 'string') {
+        errors++;
+        continue;
+      }
+
+      try {
+        this.repo.memories.saveOrUpdate(this.agentId, userId, {
+          content: entry.content,
+          category: entry.category || 'fact',
+          tags: ['micro-expert', ...(entry.tags || [])],
+        });
+        imported++;
+      } catch (e) {
+        console.error(`[micro-expert] import error: ${(e as Error).message}`);
+        errors++;
+      }
+    }
+
+    return { imported, skipped, errors };
   }
 
   /**

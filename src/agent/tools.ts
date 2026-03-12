@@ -1,4 +1,5 @@
 import type { MemoryProvider } from '../memory/provider.js';
+import { parseFetchTag, executeFetch } from './http-tool.js';
 
 export interface ToolInput {
   [key: string]: unknown;
@@ -305,6 +306,37 @@ export function registerBuiltinTools(registry: ToolRegistry, memory: MemoryProvi
       try {
         const result = safeEvaluate(args.expression as string);
         return String(result);
+      } catch (e) {
+        return `Error: ${(e as Error).message}`;
+      }
+    },
+  });
+
+  registry.register({
+    name: 'fetch',
+    description: 'Make an HTTP request to a URL. Supports GET, POST, PUT, DELETE with headers and JSON body.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE'], description: 'HTTP method' },
+        url: { type: 'string', description: 'Target URL' },
+        headers: { type: 'object', description: 'Request headers (key-value pairs)' },
+        body: { type: 'string', description: 'Request body (JSON string)' },
+      },
+      required: ['method', 'url'],
+    },
+    execute: async (args) => {
+      try {
+        const request = parseFetchTag(
+          `${args.method as string} ${args.url as string}`
+        );
+        if (args.headers) {
+          Object.assign(request.headers, args.headers);
+        }
+        if (args.body) {
+          request.body = args.body as string;
+        }
+        return await executeFetch(request);
       } catch (e) {
         return `Error: ${(e as Error).message}`;
       }

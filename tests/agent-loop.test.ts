@@ -239,4 +239,109 @@ describe('AgentLoop', () => {
 
     expect(result.content).toBe('No math here, just text.');
   });
+
+  it('should include FETCH instruction in system prompt', async () => {
+    const inference = mockInferenceClient('Sure!');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    await agent.run({
+      message: 'Hello',
+      userId: 'test-user',
+    });
+
+    const callArgs = (inference.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+    const messages = callArgs[0] as ChatMessage[];
+    const systemMsg = messages.find(m => m.role === 'system');
+
+    expect(systemMsg!.content).toContain('[FETCH:');
+    expect(systemMsg!.content).toContain('fetch data');
+  });
+
+  it('should process [FETCH: ...] tags in model response', async () => {
+    // Mock global fetch for this test
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"result": "success"}'));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      body: stream,
+    } as unknown as Response);
+
+    try {
+      const inference = mockInferenceClient('The API says: [FETCH: GET https://api.example.com/data]');
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, config);
+
+      const result = await agent.run({
+        message: 'Check the API',
+        userId: 'test-user',
+      });
+
+      expect(result.content).toContain('HTTP 200');
+      expect(result.content).toContain('{"result": "success"}');
+      expect(result.content).not.toContain('[FETCH:');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should handle FETCH errors gracefully', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+    try {
+      const inference = mockInferenceClient('Result: [FETCH: GET https://api.example.com/fail]');
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, config);
+
+      const result = await agent.run({
+        message: 'Try this',
+        userId: 'test-user',
+      });
+
+      expect(result.content).toContain('[error:');
+      expect(result.content).not.toContain('[FETCH:');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should process mixed CALC and FETCH tags', async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('42'));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      body: stream,
+    } as unknown as Response);
+
+    try {
+      const inference = mockInferenceClient('Math: [CALC: 2 + 2], API: [FETCH: GET https://api.example.com/num]');
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, config);
+
+      const result = await agent.run({
+        message: 'Both',
+        userId: 'test-user',
+      });
+
+      expect(result.content).toContain('Math: 4');
+      expect(result.content).toContain('HTTP 200');
+      expect(result.content).not.toContain('[CALC:');
+      expect(result.content).not.toContain('[FETCH:');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -190,6 +190,71 @@ program
     console.log('');
   });
 
+// --- export-memories ---
+program
+  .command('export-memories')
+  .description('Export all memories to a JSON file')
+  .option('--userId <id>', 'User ID to export memories for')
+  .option('--output <path>', 'Output file path (default: memories-<userId>.json)')
+  .action(async (opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const userId = opts.userId ?? config.defaultUserId;
+    const memory = new MemoryProvider(config);
+
+    try {
+      const exported = memory.exportMemories(userId);
+      const outputPath = opts.output ?? `memories-${userId}.json`;
+
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(outputPath, JSON.stringify(exported, null, 2));
+
+      console.log(`✅ Exported ${exported.count} memories to ${outputPath}`);
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      memory.dispose();
+    }
+  });
+
+// --- import-memories ---
+program
+  .command('import-memories <file>')
+  .description('Import memories from a JSON file')
+  .option('--userId <id>', 'User ID to import memories for')
+  .action(async (file, opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const userId = opts.userId ?? config.defaultUserId;
+    const memory = new MemoryProvider(config);
+
+    try {
+      const { readFileSync } = await import('node:fs');
+      const raw = readFileSync(file, 'utf-8');
+      const data = JSON.parse(raw);
+
+      const result = memory.importMemories(userId, data);
+
+      console.log(`✅ Import complete:`);
+      console.log(`   Imported: ${result.imported}`);
+      if (result.errors > 0) {
+        console.log(`   Errors: ${result.errors}`);
+      }
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      memory.dispose();
+    }
+  });
+
 // --- Parse and run ---
 program.parse();
 

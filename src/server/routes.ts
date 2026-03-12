@@ -49,6 +49,16 @@ export async function handleRoute(
     return handleHistoryGet(res, ctx, sessionId);
   }
 
+  // Memory export
+  if (path === '/v1/memories/export' && method === 'GET') {
+    return handleMemoryExport(res, ctx, url);
+  }
+
+  // Memory import
+  if (path === '/v1/memories/import' && method === 'POST') {
+    return handleMemoryImport(req, res, ctx, url);
+  }
+
   return false; // Not handled
 }
 
@@ -205,6 +215,60 @@ async function handleHistoryGet(
     return true;
   }
   sendJson(res, session);
+  return true;
+}
+
+async function handleMemoryExport(
+  res: ServerResponse,
+  ctx: RouteContext,
+  url: URL,
+): Promise<boolean> {
+  const userId = url.searchParams.get('userId') ?? ctx.config.defaultUserId;
+
+  try {
+    const exported = ctx.memory.exportMemories(userId);
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="memories-${userId}.json"`,
+    });
+    res.end(JSON.stringify(exported, null, 2));
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+
+  return true;
+}
+
+async function handleMemoryImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RouteContext,
+  url: URL,
+): Promise<boolean> {
+  const userId = url.searchParams.get('userId') ?? ctx.config.defaultUserId;
+
+  const body = await readBody(req);
+  if (!body) {
+    sendError(res, 400, 'Empty request body');
+    return true;
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    sendError(res, 400, 'Invalid JSON');
+    return true;
+  }
+
+  try {
+    const result = ctx.memory.importMemories(userId, data as unknown as import('../memory/provider.js').MemoryExportFile);
+    sendJson(res, result);
+  } catch (e) {
+    sendError(res, 400, (e as Error).message);
+  }
+
   return true;
 }
 
