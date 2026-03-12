@@ -9,14 +9,14 @@ Single Node.js process with:
 - **llama-server on-demand** — spawned as child_process, auto-stops after idle timeout (300s default)
 - **Web UI** — vanilla HTML served on `GET /`, zero frontend deps
 - **CLI** — commander-based: `setup`, `serve`, `chat`, `ask`, `status`, `mcp-status`
-- **MCP client** — connects to external MCP servers, exposes their tools via `[MCP: ...]` tags
+- **MCP client** — connects to external MCP servers (stdio + HTTP), exposes their tools via `[MCP: ...]` tags
 
 ## Stack
 
 - TypeScript (ESM, Node 20+)
 - `node:http` (no express)
 - `@rckflr/repomemory` (embedded)
-- `@modelcontextprotocol/sdk` (MCP client)
+- `@modelcontextprotocol/sdk` (MCP client — stdio transport)
 - `commander` (CLI)
 - `vitest` (tests)
 
@@ -24,7 +24,7 @@ Single Node.js process with:
 
 ```bash
 npm run build       # Compile TypeScript + copy UI assets to dist/
-npm test            # Run tests (108 tests, 7 suites)
+npm test            # Run tests (115 tests, 7 suites)
 npm start           # Start server (micro-expert serve)
 npm run dev         # TypeScript watch mode
 ```
@@ -46,7 +46,12 @@ Key design decisions:
 - `[CALC: expr]` — safe math evaluator (recursive descent parser, no `eval()`)
 - `[FETCH: METHOD url]` — HTTP requests with security (blocked hosts, timeout, size limits)
 - `[MCP: tool_name {"arg": "val"}]` — call tools from external MCP servers
-- MCP client connects to configured servers via stdio transport, discovers tools at startup
+- MCP client supports two transport modes:
+  - **stdio** — subprocess-based via MCP SDK `StdioClientTransport` (for local CLI servers)
+  - **HTTP** — custom `HttpMcpClient` using `node:http` (for remote servers like n8n that speak Streamable HTTP/SSE)
+- Transport auto-detected: `url` field → HTTP, `command` field → stdio
+- Custom `headers` field for HTTP-based transports (e.g., `Authorization: Bearer ...`)
+- SDK SSE/StreamableHTTP transports hang on Windows — `HttpMcpClient` reads first SSE event and destroys stream
 - MCP servers configured in `~/.micro-expert/config.json` under `mcpServers` (same format as claude_desktop_config.json)
 - Memory import/export via API endpoints and CLI commands
 
@@ -83,6 +88,22 @@ Key design decisions:
 - MCP servers: none (configure in config.json)
 - MCP max tools: 10 (limit for sub-1B prompt size)
 
+## MCP Config Example
+
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "url": "http://localhost:5678/mcp/WORKFLOW_UUID"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+    }
+  }
+}
+```
+
 ## RepoMemory API Notes
 
 - `recall(agentId, userId, query, options)` — 4 params, agentId first
@@ -100,6 +121,6 @@ Tests in `tests/`:
 - `calculator.test.ts` — safe math evaluator: arithmetic, precedence, functions, errors (24 tests)
 - `http-tool.test.ts` — FETCH tag parsing, URL validation, security, execution (32 tests)
 - `memory-export.test.ts` — export/import round-trip, validation, error handling (8 tests)
-- `mcp-client.test.ts` — MCP client manager: connect, disconnect, tool discovery, calling, prompt generation (13 tests)
+- `mcp-client.test.ts` — MCP client: stdio connect, HTTP connect, tool discovery, calling, disconnect, prompt generation, transport selection, error handling (20 tests)
 
-Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport.
+Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport + HttpMcpClient.

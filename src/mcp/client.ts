@@ -1,16 +1,21 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { HttpMcpClient } from './http-transport.js';
 
 /** Max characters returned from a tool call result */
 const MAX_RESULT_CHARS = 2048;
 
 export interface McpServerConfig {
-  /** The executable to run to start the MCP server */
-  command: string;
-  /** Command line arguments for the server */
+  /** The executable to run to start the MCP server (stdio transport) */
+  command?: string;
+  /** Command line arguments for the server (stdio transport) */
   args?: string[];
-  /** Environment variables for the server process */
+  /** Environment variables for the server process (stdio transport) */
   env?: Record<string, string>;
+  /** URL for HTTP-based MCP servers (e.g., http://localhost:5678/mcp/xxx) */
+  url?: string;
+  /** Custom headers for HTTP-based transports (e.g., Authorization) */
+  headers?: Record<string, string>;
 }
 
 export interface McpToolInfo {
@@ -29,10 +34,15 @@ export interface McpToolInfo {
 /**
  * Manages connections to multiple MCP servers and exposes their tools
  * for use in the agent pipeline via [MCP: tool_name {"arg": "val"}] tags.
+ *
+ * Supports two transport modes:
+ * - **stdio**: subprocess-based via MCP SDK (for local CLI servers)
+ * - **http**: direct HTTP/SSE via HttpMcpClient (for remote servers like n8n)
  */
 export class McpClientManager {
-  private clients: Map<string, Client> = new Map();
-  private transports: Map<string, StdioClientTransport> = new Map();
+  private sdkClients: Map<string, Client> = new Map();
+  private stdioTransports: Map<string, StdioClientTransport> = new Map();
+  private httpClients: Map<string, HttpMcpClient> = new Map();
   private tools: Map<string, McpToolInfo> = new Map();
 
   /**
@@ -54,8 +64,47 @@ export class McpClientManager {
    * Connect to a single MCP server and discover its tools.
    */
   async connect(name: string, config: McpServerConfig): Promise<void> {
+    if (config.url) {
+      await this.connectHttp(name, config);
+    } else if (config.command) {
+      await this.connectStdio(name, config);
+    } else {
+      throw new Error(`MCP server '${name}' requires either 'url' or 'command'`);
+    }
+  }
+
+  /**
+   * Connect via HTTP (for servers like n8n that expose MCP over HTTP/SSE).
+   */
+  private async connectHttp(name: string, config: McpServerConfig): Promise<void> {
+    const client = new HttpMcpClient({ url: config.url!, headers: config.headers });
+    const { serverInfo, tools } = await client.initialize();
+
+    console.log(`[micro-expert] MCP: connected to '${name}' (${serverInfo.name} v${serverInfo.version}) via HTTP`);
+
+    for (const tool of tools) {
+      const qualifiedName = this.tools.has(tool.name)
+        ? `${name}__${tool.name}`
+        : tool.name;
+
+      this.tools.set(qualifiedName, {
+        serverName: name,
+        qualifiedName,
+        originalName: tool.name,
+        description: tool.description ?? 'No description',
+        inputSchema: tool.inputSchema as Record<string, unknown>,
+      });
+    }
+
+    this.httpClients.set(name, client);
+  }
+
+  /**
+   * Connect via stdio (for local subprocess MCP servers).
+   */
+  private async connectStdio(name: string, config: McpServerConfig): Promise<void> {
     const transport = new StdioClientTransport({
-      command: config.command,
+      command: config.command!,
       args: config.args ?? [],
       env: config.env ? { ...process.env as Record<string, string>, ...config.env } : undefined,
       stderr: 'pipe',
@@ -67,11 +116,9 @@ export class McpClientManager {
 
     await client.connect(transport);
 
-    // Discover tools from this server
     try {
       const { tools } = await client.listTools();
       for (const tool of tools) {
-        // Handle name collisions: prefix with serverName__ if already taken
         const qualifiedName = this.tools.has(tool.name)
           ? `${name}__${tool.name}`
           : tool.name;
@@ -88,28 +135,32 @@ export class McpClientManager {
       console.error(`[micro-expert] MCP: failed to list tools from '${name}': ${(e as Error).message}`);
     }
 
-    this.clients.set(name, client);
-    this.transports.set(name, transport);
+    this.sdkClients.set(name, client);
+    this.stdioTransports.set(name, transport);
   }
 
   /**
    * Disconnect a single MCP server.
    */
   async disconnect(name: string): Promise<void> {
-    const client = this.clients.get(name);
-    if (client) {
-      try {
-        await client.close();
-      } catch { /* ignore close errors */ }
-      this.clients.delete(name);
+    // Disconnect SDK client (stdio)
+    const sdkClient = this.sdkClients.get(name);
+    if (sdkClient) {
+      try { await sdkClient.close(); } catch { /* ignore */ }
+      this.sdkClients.delete(name);
     }
 
-    const transport = this.transports.get(name);
+    const transport = this.stdioTransports.get(name);
     if (transport) {
-      try {
-        await transport.close();
-      } catch { /* ignore close errors */ }
-      this.transports.delete(name);
+      try { await transport.close(); } catch { /* ignore */ }
+      this.stdioTransports.delete(name);
+    }
+
+    // Disconnect HTTP client
+    const httpClient = this.httpClients.get(name);
+    if (httpClient) {
+      try { await httpClient.close(); } catch { /* ignore */ }
+      this.httpClients.delete(name);
     }
 
     // Remove tools belonging to this server
@@ -124,7 +175,7 @@ export class McpClientManager {
    * Disconnect all MCP servers.
    */
   async disconnectAll(): Promise<void> {
-    const names = [...this.clients.keys()];
+    const names = new Set([...this.sdkClients.keys(), ...this.httpClients.keys()]);
     for (const name of names) {
       await this.disconnect(name);
     }
@@ -140,15 +191,23 @@ export class McpClientManager {
       throw new Error(`Unknown MCP tool: ${toolName}`);
     }
 
-    const client = this.clients.get(info.serverName);
-    if (!client) {
+    let result: { content?: unknown };
+
+    // Route to the appropriate client
+    const httpClient = this.httpClients.get(info.serverName);
+    const sdkClient = this.sdkClients.get(info.serverName);
+
+    if (httpClient) {
+      result = await httpClient.callTool(info.originalName, args);
+    } else if (sdkClient) {
+      const sdkResult = await sdkClient.callTool({
+        name: info.originalName,
+        arguments: args,
+      });
+      result = { content: sdkResult.content };
+    } else {
       throw new Error(`MCP server '${info.serverName}' not connected`);
     }
-
-    const result = await client.callTool({
-      name: info.originalName,
-      arguments: args,
-    });
 
     // Serialize result content to string
     let text: string;

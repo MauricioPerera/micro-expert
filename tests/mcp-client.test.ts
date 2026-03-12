@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { McpClientManager } from '../src/mcp/client.js';
 import type { McpToolInfo } from '../src/mcp/client.js';
 
-// Mock the MCP SDK modules
+// Mock the MCP SDK modules (stdio transport)
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   return {
     Client: vi.fn().mockImplementation(() => ({
@@ -22,7 +22,25 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
   };
 });
 
+// Mock the HttpMcpClient (HTTP transport)
+vi.mock('../src/mcp/http-transport.js', () => {
+  return {
+    HttpMcpClient: vi.fn().mockImplementation(() => ({
+      initialize: vi.fn().mockResolvedValue({
+        serverInfo: { name: 'mock-server', version: '0.1.0' },
+        tools: [],
+      }),
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'mock result' }],
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    })),
+  };
+});
+
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { HttpMcpClient } from '../src/mcp/http-transport.js';
 
 describe('McpClientManager', () => {
   let manager: McpClientManager;
@@ -41,7 +59,7 @@ describe('McpClientManager', () => {
     expect(manager.listTools()).toEqual([]);
   });
 
-  it('should connect to a server and discover tools', async () => {
+  it('should connect to a stdio server and discover tools', async () => {
     const mockClient = {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -73,8 +91,52 @@ describe('McpClientManager', () => {
     expect(tools[1].qualifiedName).toBe('write_file');
   });
 
+  it('should connect to an HTTP server and discover tools', async () => {
+    (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      initialize: vi.fn().mockResolvedValue({
+        serverInfo: { name: 'n8n-server', version: '1.0.0' },
+        tools: [
+          { name: 'get_time', description: 'Get current time', inputSchema: { type: 'object' } },
+        ],
+      }),
+      callTool: vi.fn(),
+      close: vi.fn(),
+    }));
+
+    await manager.connect('n8n', { url: 'http://localhost:5678/mcp/test' });
+
+    const tools = manager.listTools();
+    expect(tools).toHaveLength(1);
+    expect(tools[0].qualifiedName).toBe('get_time');
+    expect(tools[0].serverName).toBe('n8n');
+    expect(HttpMcpClient).toHaveBeenCalledWith({
+      url: 'http://localhost:5678/mcp/test',
+      headers: undefined,
+    });
+  });
+
+  it('should pass headers to HttpMcpClient', async () => {
+    (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      initialize: vi.fn().mockResolvedValue({
+        serverInfo: { name: 'auth-server', version: '1.0.0' },
+        tools: [],
+      }),
+      callTool: vi.fn(),
+      close: vi.fn(),
+    }));
+
+    await manager.connect('auth', {
+      url: 'http://localhost:5678/mcp/test',
+      headers: { 'Authorization': 'Bearer token123' },
+    });
+
+    expect(HttpMcpClient).toHaveBeenCalledWith({
+      url: 'http://localhost:5678/mcp/test',
+      headers: { 'Authorization': 'Bearer token123' },
+    });
+  });
+
   it('should handle tool name collisions with prefix', async () => {
-    // First server has 'list' tool
     const mockClient1 = {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -83,7 +145,6 @@ describe('McpClientManager', () => {
       }),
       callTool: vi.fn(),
     };
-    // Second server also has 'list' tool
     const mockClient2 = {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -110,7 +171,7 @@ describe('McpClientManager', () => {
     expect(tools[1].serverName).toBe('serverB');
   });
 
-  it('should call a tool and return text result', async () => {
+  it('should call a stdio tool and return text result', async () => {
     const mockClient = {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -131,6 +192,26 @@ describe('McpClientManager', () => {
       name: 'echo',
       arguments: { message: 'Hello' },
     });
+  });
+
+  it('should call an HTTP tool and return text result', async () => {
+    const mockCallTool = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Hello from n8n!' }],
+    });
+    (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      initialize: vi.fn().mockResolvedValue({
+        serverInfo: { name: 'n8n', version: '1.0.0' },
+        tools: [{ name: 'greet', description: 'Greet', inputSchema: { type: 'object' } }],
+      }),
+      callTool: mockCallTool,
+      close: vi.fn(),
+    }));
+
+    await manager.connect('n8n', { url: 'http://localhost:5678/mcp/test' });
+    const result = await manager.callTool('greet', { name: 'World' });
+
+    expect(result).toBe('Hello from n8n!');
+    expect(mockCallTool).toHaveBeenCalledWith('greet', { name: 'World' });
   });
 
   it('should serialize non-text content as JSON', async () => {
@@ -178,23 +259,37 @@ describe('McpClientManager', () => {
     await expect(manager.callTool('nonexistent', {})).rejects.toThrow('Unknown MCP tool');
   });
 
-  it('should disconnect all servers', async () => {
-    const mockClient = {
+  it('should disconnect all servers (stdio + http)', async () => {
+    // Add a stdio server
+    const mockSdkClient = {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
       listTools: vi.fn().mockResolvedValue({
-        tools: [{ name: 'tool1', description: 'Test', inputSchema: { type: 'object' } }],
+        tools: [{ name: 'stdio_tool', description: 'Test', inputSchema: { type: 'object' } }],
       }),
       callTool: vi.fn(),
     };
-    (Client as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => mockClient);
+    (Client as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => mockSdkClient);
 
-    await manager.connect('test', { command: 'node', args: ['test.js'] });
-    expect(manager.listTools()).toHaveLength(1);
+    // Add an HTTP server
+    const mockHttpClose = vi.fn();
+    (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      initialize: vi.fn().mockResolvedValue({
+        serverInfo: { name: 'n8n', version: '1.0.0' },
+        tools: [{ name: 'http_tool', description: 'Test', inputSchema: { type: 'object' } }],
+      }),
+      callTool: vi.fn(),
+      close: mockHttpClose,
+    }));
+
+    await manager.connect('stdio', { command: 'node', args: ['test.js'] });
+    await manager.connect('http', { url: 'http://localhost:5678/mcp/test' });
+    expect(manager.listTools()).toHaveLength(2);
 
     await manager.disconnectAll();
     expect(manager.listTools()).toHaveLength(0);
-    expect(mockClient.close).toHaveBeenCalled();
+    expect(mockSdkClient.close).toHaveBeenCalled();
+    expect(mockHttpClose).toHaveBeenCalled();
   });
 
   it('should handle server connection failure gracefully in connectAll', async () => {
@@ -205,12 +300,71 @@ describe('McpClientManager', () => {
       callTool: vi.fn(),
     }));
 
-    // Should not throw
     await manager.connectAll({
       failing: { command: 'nonexistent', args: [] },
     });
 
     expect(manager.listTools()).toEqual([]);
+  });
+
+  it('should handle HTTP server connection failure gracefully', async () => {
+    (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      initialize: vi.fn().mockRejectedValue(new Error('Network error')),
+      callTool: vi.fn(),
+      close: vi.fn(),
+    }));
+
+    await manager.connectAll({
+      failing: { url: 'http://localhost:9999/mcp/bad' },
+    });
+
+    expect(manager.listTools()).toEqual([]);
+  });
+
+  describe('transport selection', () => {
+    it('should use StdioClientTransport when command is provided', async () => {
+      const mockClient = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        callTool: vi.fn(),
+      };
+      (Client as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => mockClient);
+
+      await manager.connect('stdio-server', { command: 'node', args: ['server.js'] });
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(expect.objectContaining({
+        command: 'node',
+        args: ['server.js'],
+      }));
+    });
+
+    it('should use HttpMcpClient when url is provided', async () => {
+      (HttpMcpClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+        initialize: vi.fn().mockResolvedValue({
+          serverInfo: { name: 'test-server', version: '0.1.0' },
+          tools: [],
+        }),
+        callTool: vi.fn(),
+        close: vi.fn(),
+      }));
+
+      await manager.connect('http-server', { url: 'http://localhost:5678/mcp/workflow1' });
+
+      expect(HttpMcpClient).toHaveBeenCalledWith({
+        url: 'http://localhost:5678/mcp/workflow1',
+        headers: undefined,
+      });
+      // Should NOT create SDK Client/StdioTransport
+      expect(Client).not.toHaveBeenCalled();
+      expect(StdioClientTransport).not.toHaveBeenCalled();
+    });
+
+    it('should throw if neither command nor url is provided', async () => {
+      await expect(
+        manager.connect('bad', {}),
+      ).rejects.toThrow("requires either 'url' or 'command'");
+    });
   });
 
   describe('toSystemPromptSection', () => {
