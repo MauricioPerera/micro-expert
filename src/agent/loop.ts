@@ -1,6 +1,8 @@
 import type { InferenceClient, ChatMessage, StreamDelta } from '../inference/client.js';
 import type { MemoryProvider } from '../memory/provider.js';
 import type { MicroExpertConfig } from '../config.js';
+import type { ToolRegistry } from './tools.js';
+import { safeEvaluate } from './tools.js';
 
 export interface AgentRequest {
   /** User's message */
@@ -36,15 +38,18 @@ export class AgentLoop {
   private readonly inference: InferenceClient;
   private readonly memory: MemoryProvider;
   private readonly config: MicroExpertConfig;
+  private readonly tools?: ToolRegistry;
 
   constructor(
     inference: InferenceClient,
     memory: MemoryProvider,
     config: MicroExpertConfig,
+    tools?: ToolRegistry,
   ) {
     this.inference = inference;
     this.memory = memory;
     this.config = config;
+    this.tools = tools;
   }
 
   /**
@@ -64,7 +69,10 @@ export class AgentLoop {
       topP: this.config.topP,
     });
 
-    const content = response.choices[0]?.message?.content ?? '';
+    let content = response.choices[0]?.message?.content ?? '';
+
+    // 3.5. Process tool calls (e.g., [CALC: 2+3] → 5)
+    content = this.processToolCalls(content);
 
     // 4. Save session (fire and forget)
     const sessionId = this.memory.saveSession(request.userId, [
@@ -110,6 +118,22 @@ export class AgentLoop {
   }
 
   /**
+   * Detect and execute inline tool calls in the model's response.
+   * Pattern: [CALC: expression] → replaced with the numeric result.
+   * If evaluation fails, replaced with [error: message].
+   */
+  private processToolCalls(content: string): string {
+    return content.replace(/\[CALC:\s*(.+?)\]/g, (_match, expr: string) => {
+      try {
+        const result = safeEvaluate(expr.trim());
+        return String(result);
+      } catch (e) {
+        return `[error: ${(e as Error).message}]`;
+      }
+    });
+  }
+
+  /**
    * Build the full message array for inference.
    */
   private buildMessages(request: AgentRequest, context: string): ChatMessage[] {
@@ -120,11 +144,19 @@ export class AgentLoop {
     // Keep the system prompt short and put context FIRST for maximum attention.
     let systemContent: string;
 
+    // Current date/time context — the model has no sense of time without this
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    const dateContext = `Current date: ${dateStr}. Current time: ${timeStr}.`;
+
+    const calcInstruction = 'To perform calculations, write [CALC: expression]. Example: [CALC: 15 * 3 + 7]';
+
     if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
-      systemContent = `${context}\n\nYou are MicroExpert, a helpful AI assistant. IMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
+      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
     } else {
-      systemContent = 'You are MicroExpert, a helpful AI assistant. Answer concisely and accurately.';
+      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\nAnswer concisely and accurately.`;
     }
 
     messages.push({ role: 'system', content: systemContent });

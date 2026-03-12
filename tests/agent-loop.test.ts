@@ -149,4 +149,94 @@ describe('AgentLoop', () => {
     expect(messages[3].role).toBe('user');
     expect(messages[3].content).toBe('Continue');
   });
+
+  it('should include current date/time in system prompt', async () => {
+    const inference = mockInferenceClient('Today is nice!');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    await agent.run({
+      message: 'What day is it?',
+      userId: 'test-user',
+    });
+
+    const callArgs = (inference.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+    const messages = callArgs[0] as ChatMessage[];
+    const systemMsg = messages.find(m => m.role === 'system');
+
+    expect(systemMsg!.content).toContain('Current date:');
+    expect(systemMsg!.content).toContain('Current time:');
+  });
+
+  it('should include calculator instruction in system prompt', async () => {
+    const inference = mockInferenceClient('Sure!');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    await agent.run({
+      message: 'Hello',
+      userId: 'test-user',
+    });
+
+    const callArgs = (inference.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
+    const messages = callArgs[0] as ChatMessage[];
+    const systemMsg = messages.find(m => m.role === 'system');
+
+    expect(systemMsg!.content).toContain('[CALC:');
+    expect(systemMsg!.content).toContain('calculations');
+  });
+
+  it('should process [CALC: ...] tags in model response', async () => {
+    const inference = mockInferenceClient('The result is [CALC: 5 + 3] items.');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({
+      message: 'What is 5 + 3?',
+      userId: 'test-user',
+    });
+
+    expect(result.content).toBe('The result is 8 items.');
+    expect(result.content).not.toContain('[CALC:');
+  });
+
+  it('should handle multiple [CALC] tags in one response', async () => {
+    const inference = mockInferenceClient('Sum: [CALC: 10 + 20], Product: [CALC: 3 * 7]');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({
+      message: 'Calculate both',
+      userId: 'test-user',
+    });
+
+    expect(result.content).toBe('Sum: 30, Product: 21');
+  });
+
+  it('should handle invalid [CALC] expressions gracefully', async () => {
+    const inference = mockInferenceClient('Result: [CALC: 2 & 3]');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({
+      message: 'Calculate something',
+      userId: 'test-user',
+    });
+
+    expect(result.content).toContain('[error:');
+    expect(result.content).not.toContain('[CALC:');
+  });
+
+  it('should leave response unchanged when no [CALC] tags present', async () => {
+    const inference = mockInferenceClient('No math here, just text.');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({
+      message: 'Tell me a story',
+      userId: 'test-user',
+    });
+
+    expect(result.content).toBe('No math here, just text.');
+  });
 });

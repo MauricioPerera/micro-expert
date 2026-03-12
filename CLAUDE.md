@@ -22,22 +22,26 @@ Single Node.js process with:
 
 ```bash
 npm run build       # Compile TypeScript + copy UI assets to dist/
-npm test            # Run tests (15 tests, 3 suites)
+npm test            # Run tests (45 tests, 4 suites)
 npm start           # Start server (micro-expert serve)
 npm run dev         # TypeScript watch mode
 ```
 
-## Agent Pipeline (v0.1 — fixed, no LLM tool calling)
+## Agent Pipeline
 
 1. `memory.recall(query, userId)` — retrieve CTT context + profile
-2. `buildMessages()` — context FIRST in system prompt (sub-1B attention optimization)
+2. `buildMessages()` — context FIRST in system prompt (sub-1B attention optimization), date/time context, calculator instruction
 3. `inference.chatCompletion(messages)` — send to llama-server
-4. `memory.saveSession(userId, [user, assistant])` — persist the turn
+4. `processToolCalls(content)` — detect `[CALC: expr]` tags, evaluate with safe parser, replace with results
+5. `memory.saveSession(userId, [user, assistant])` — persist the turn (with resolved tool results)
 
 Key design decisions:
 - Context is placed BEFORE the role instruction in system prompt — sub-1B models pay more attention to early tokens
 - User profiles (`includeProfile: true`) always included in recall for baseline context
 - Inference client has retry logic for idle timeout race conditions
+- Date/time context injected so the model knows current date and time
+- Tool calling via tag-based format (`[CALC: ...]`) — sub-1B models can't do native function calling
+- Safe math evaluator: recursive descent parser, no `eval()`, supports +, -, *, /, %, parentheses, sqrt, pow, abs, round, ceil, floor, min, max
 
 ## Conventions
 
@@ -83,6 +87,7 @@ Key design decisions:
 Tests in `tests/`:
 - `config.test.ts` — defaults, CLI overrides, env vars, priority (5 tests)
 - `memory-provider.test.ts` — recall, sessions, search, stats (6 tests)
-- `agent-loop.test.ts` — pipeline with mocks, streaming, history (4 tests)
+- `agent-loop.test.ts` — pipeline with mocks, streaming, history, date/time, tool calls (10 tests)
+- `calculator.test.ts` — safe math evaluator: arithmetic, precedence, functions, errors (24 tests)
 
 Memory tests use real RepoMemory in tmpdir. Agent tests mock InferenceClient.
