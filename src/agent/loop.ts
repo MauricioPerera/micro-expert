@@ -76,6 +76,9 @@ export class AgentLoop {
 
     let content = response.choices[0]?.message?.content ?? '';
 
+    // Strip thinking tokens (Qwen3.5 may emit <think>...</think> even with /no_think)
+    content = stripThinkingTokens(content);
+
     // 3.5. Process tool calls (e.g., [CALC: 2+3] → 5, [FETCH: GET url] → response)
     content = await this.processToolCalls(content);
 
@@ -225,15 +228,20 @@ export class AgentLoop {
     // MCP tool instructions (only if MCP tools are available)
     const mcpInstruction = this.mcp ? this.mcp.toSystemPromptSection(this.config.mcpMaxTools) : '';
 
+    // Disable thinking mode for Qwen3.5 when not explicitly enabled
+    const noThink = !this.config.thinkingMode ? '\n/no_think' : '';
+
     if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
       systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}`;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
       systemContent += '\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.';
+      systemContent += noThink;
     } else {
       systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\n${fetchInstruction}`;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
       systemContent += '\nAnswer concisely and accurately.';
+      systemContent += noThink;
     }
 
     messages.push({ role: 'system', content: systemContent });
@@ -258,4 +266,16 @@ export class AgentLoop {
 
     return messages;
   }
+}
+
+/**
+ * Strip Qwen3.5 thinking tokens from output.
+ * Removes <think>...</think> blocks and any leftover tags.
+ */
+function stripThinkingTokens(content: string): string {
+  // Remove complete <think>...</think> blocks (including multiline)
+  content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
+  // Remove orphaned opening/closing tags
+  content = content.replace(/<\/?think>/g, '');
+  return content.trim();
 }

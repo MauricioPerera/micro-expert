@@ -472,14 +472,17 @@ async function sendMessage() {
           const delta = chunk.choices?.[0]?.delta?.content || '';
           if (delta) {
             fullContent += delta;
-            contentDiv.innerHTML = renderMarkdown(fullContent);
+            const visible = stripThinking(fullContent);
+            if (visible) { contentDiv.innerHTML = renderMarkdown(visible); }
             chatContainer.scrollTop = chatContainer.scrollHeight;
           }
         } catch {}
       }
     }
 
-    messages.push({ role: 'assistant', content: fullContent });
+    const cleanContent = stripThinking(fullContent);
+    if (cleanContent) { contentDiv.innerHTML = renderMarkdown(cleanContent); }
+    messages.push({ role: 'assistant', content: cleanContent || fullContent });
   } catch (e) {
     contentDiv.classList.remove('thinking');
     contentDiv.innerHTML = `<em style="color:var(--accent)">Connection error: ${e.message}</em>`;
@@ -497,6 +500,10 @@ function addMessage(role, text) {
   chatContainer.appendChild(div);
   chatContainer.scrollTop = chatContainer.scrollHeight;
   return div;
+}
+
+function stripThinking(text) {
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '').trim();
 }
 
 function renderMarkdown(text) {
