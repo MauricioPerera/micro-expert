@@ -51,9 +51,6 @@ export class InferenceClient {
     messages: ChatMessage[],
     options: ChatCompletionOptions = {},
   ): Promise<ChatCompletionResponse> {
-    const port = await this.manager.ensureRunning();
-    this.manager.touch();
-
     const body = {
       messages,
       max_tokens: options.maxTokens ?? 512,
@@ -63,18 +60,34 @@ export class InferenceClient {
       stream: false,
     };
 
-    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    // Retry once if server died mid-request (idle timeout race)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const port = await this.manager.ensureRunning();
+      this.manager.touch();
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Inference failed (${res.status}): ${text}`);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Inference failed (${res.status}): ${text}`);
+        }
+
+        return await res.json() as ChatCompletionResponse;
+      } catch (e) {
+        if (attempt === 0 && (e as Error).message?.includes('fetch failed')) {
+          console.log('[micro-expert] Inference request failed, retrying with server restart...');
+          continue;
+        }
+        throw e;
+      }
     }
 
-    return await res.json() as ChatCompletionResponse;
+    throw new Error('Inference failed after retry');
   }
 
   /**
@@ -97,11 +110,28 @@ export class InferenceClient {
       stream: true,
     };
 
-    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      // Retry once on connection failure (idle timeout race)
+      if ((e as Error).message?.includes('fetch failed')) {
+        console.log('[micro-expert] Stream request failed, retrying with server restart...');
+        const retryPort = await this.manager.ensureRunning();
+        this.manager.touch();
+        res = await fetch(`http://127.0.0.1:${retryPort}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } else {
+        throw e;
+      }
+    }
 
     if (!res.ok) {
       const text = await res.text();

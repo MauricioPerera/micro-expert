@@ -9,7 +9,7 @@
     "micro-expert": "./dist/bin/micro-expert.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const{cpSync}=require('fs');cpSync('src/ui',  'dist/src/ui',{recursive:true})\"",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -92,11 +92,11 @@ describe('AgentLoop', () => {
       userId: 'test-user',
     });
 
-    // System message should NOT contain context markers
+    // System message should NOT contain recalled context
     const callArgs = (inference.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0];
     const messages = callArgs[0] as ChatMessage[];
     const systemMsg = messages.find(m => m.role === 'system');
-    expect(systemMsg!.content).not.toContain('[Relevant context from memory]');
+    expect(systemMsg!.content).not.toContain('Relevant Memories');
 
     expect(result.content).toBe('I can help!');
     expect(result.recalledItems).toBe(0);

@@ -116,10 +116,15 @@ export class AgentLoop {
     const messages: ChatMessage[] = [];
 
     // System prompt with CTT context
-    let systemContent = 'You are MicroExpert, a helpful local AI assistant with persistent memory. Answer concisely and accurately.';
+    // NOTE: Sub-1B models need very direct, explicit instructions.
+    // Keep the system prompt short and put context FIRST for maximum attention.
+    let systemContent: string;
 
     if (context.trim()) {
-      systemContent += `\n\n[Relevant context from memory]\n${context}\n[End of context]\n\nUse the above context to inform your response when relevant. If the context answers the user's question, use it directly.`;
+      // Put context BEFORE the role instruction — small models pay more attention to early tokens
+      systemContent = `${context}\n\nYou are MicroExpert, a helpful AI assistant. IMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.`;
+    } else {
+      systemContent = 'You are MicroExpert, a helpful AI assistant. Answer concisely and accurately.';
     }
 
     messages.push({ role: 'system', content: systemContent });
