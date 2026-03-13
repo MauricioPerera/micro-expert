@@ -165,8 +165,13 @@ export class InferenceClient {
 
           try {
             const chunk = JSON.parse(data);
-            const delta = chunk.choices?.[0]?.delta?.content ?? '';
+            const choiceDelta = chunk.choices?.[0]?.delta ?? {};
+            const content = choiceDelta.content ?? '';
+            const reasoning = choiceDelta.reasoning_content ?? '';
             const finishReason = chunk.choices?.[0]?.finish_reason;
+
+            // Wrap reasoning_content in <think> tags so client-side stripping handles it
+            const delta = reasoning ? `<think>${reasoning}</think>` : content;
 
             if (delta || finishReason) {
               yield {

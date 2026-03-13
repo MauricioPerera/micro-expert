@@ -290,7 +290,7 @@ async function handleMemoryImport(
 
 // --- Helpers ---
 
-const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB (images as base64 can be large)
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
