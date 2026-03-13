@@ -2,7 +2,7 @@
 
 **Local AI agent powered by sub-1B models and RepoMemory CTT.**
 
-MicroExpert proves a simple thesis: a tiny model with the right memory beats a giant model with none. It combines a sub-1B parameter LLM with [RepoMemory](https://github.com/rckflr/repomemory) — a Git-inspired, content-addressable memory system — to create a local AI agent that learns from every interaction and adapts to your context over time.
+MicroExpert proves a simple thesis: a tiny model with the right memory beats a giant model with none. It combines a sub-1B parameter LLM with [RepoMemory](https://github.com/MauricioPerera/repomemory-v2) — a Git-inspired, content-addressable memory system — to create a local AI agent that learns from every interaction and adapts to your context over time.
 
 No cloud. No API keys. No fine-tuning. Just context.
 
