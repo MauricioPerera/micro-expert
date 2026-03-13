@@ -278,6 +278,12 @@ async function handleMemoryImport(
     return true;
   }
 
+  // v2: validate skills array if present
+  if (data.version >= 2 && data.skills !== undefined && !Array.isArray(data.skills)) {
+    sendError(res, 400, 'Invalid v2 format: "skills" must be an array');
+    return true;
+  }
+
   try {
     const result = ctx.memory.importMemories(userId, data as unknown as import('../memory/provider.js').MemoryExportFile);
     sendJson(res, result);

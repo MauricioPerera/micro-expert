@@ -184,4 +184,77 @@ describe('Memory Export/Import', () => {
     // Should attempt to import (category defaults to 'fact')
     expect(result.imported + result.errors).toBe(1);
   });
+
+  // --- v2 Pack Format ---
+
+  it('should export v2 format with pack metadata', () => {
+    createProvider();
+    const userId = uniqueUserId();
+
+    provider.saveMemory(userId, 'General fact', 'fact', ['general']);
+    provider.saveMemory(userId, 'Para listar workflows: [MCP: n8n_list_workflows {}]', 'mcp-skill', ['n8n']);
+
+    const exported = provider.exportMemories(userId, {
+      name: 'n8n MCP Skills',
+      description: 'Tool-calling skills for n8n workflow automation',
+      author: 'test',
+      packVersion: '1.0.0',
+      models: ['qwen3.5-0.8b', 'qwen3.5-2b'],
+    });
+
+    expect(exported.version).toBe(2);
+    expect(exported.pack?.name).toBe('n8n MCP Skills');
+    expect(exported.pack?.models).toContain('qwen3.5-0.8b');
+    expect(exported.skills).toBeDefined();
+    expect(exported.skills!.length).toBeGreaterThanOrEqual(1);
+    // Skills should contain the MCP pattern
+    expect(exported.skills!.some(s => s.content.includes('[MCP:'))).toBe(true);
+    // Regular memories should NOT contain MCP patterns
+    expect(exported.memories.every(m => !m.content.includes('[MCP:') || m.category !== 'mcp-skill')).toBe(true);
+    expect(exported.count).toBe(exported.memories.length + exported.skills!.length);
+  });
+
+  it('should import v2 format with skills', { timeout: 15_000 }, () => {
+    createProvider();
+    const userId = uniqueUserId();
+
+    const data: MemoryExportFile = {
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      userId,
+      agentId: testAgentId,
+      count: 3,
+      pack: {
+        name: 'Test Pack',
+        description: 'A test memory pack',
+        packVersion: '0.1.0',
+      },
+      memories: [
+        { content: 'General knowledge', category: 'fact', tags: [] },
+      ],
+      skills: [
+        { content: 'Para listar: [MCP: n8n_list_workflows {}]', category: 'mcp-skill', tags: ['n8n'] },
+        { content: 'Para crear: [MCP: n8n_create_workflow {"name": "X"}]', category: 'mcp-skill', tags: ['n8n'] },
+      ],
+    };
+
+    const result = provider.importMemories(userId, data);
+    expect(result.imported).toBeGreaterThanOrEqual(2);
+    expect(result.skills).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should auto-detect v2 when skills are found even without pack metadata', () => {
+    createProvider();
+    const userId = uniqueUserId();
+
+    // Save a skill-category memory with MCP pattern
+    provider.saveMemory(userId, 'Use [MCP: tool {}] for actions', 'mcp-skill', ['mcp']);
+
+    const exported = provider.exportMemories(userId);
+
+    // Should auto-upgrade to v2 because skills were found
+    expect(exported.version).toBe(2);
+    expect(exported.skills).toBeDefined();
+    expect(exported.skills!.length).toBeGreaterThanOrEqual(1);
+  });
 });

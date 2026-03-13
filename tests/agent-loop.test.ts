@@ -433,6 +433,67 @@ describe('AgentLoop', () => {
     expect(result.content).not.toContain('[MCP:');
   });
 
+  it('should process [MCP:] tags with nested brackets in JSON args', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([]),
+      toSystemPromptSection: vi.fn().mockReturnValue(''),
+      callTool: vi.fn().mockResolvedValue('workflow-created'),
+    } as unknown as McpClientManager;
+
+    // JSON args contain arrays like "position": [250, 300] — old regex would break on the inner ]
+    const complexJson = '{"name": "Test", "nodes": [{"id": "t1", "type": "n8n-nodes-base.httpRequest", "position": [250, 300], "parameters": {}}], "connections": {}}';
+    const inference = mockInferenceClient(`Creating: [MCP: n8n_create_workflow ${complexJson}]`);
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    const result = await agent.run({ message: 'Create workflow', userId: 'test-user' });
+
+    expect(result.content).toBe('Creating: workflow-created');
+    expect(mockMcp.callTool).toHaveBeenCalledWith('n8n_create_workflow', JSON.parse(complexJson));
+  });
+
+  it('should unwrap MCP tags from markdown code blocks', async () => {
+    const mockMcp = {
+      listTools: vi.fn().mockReturnValue([]),
+      toSystemPromptSection: vi.fn().mockReturnValue(''),
+      callTool: vi.fn().mockResolvedValue('done'),
+    } as unknown as McpClientManager;
+
+    // Model wraps MCP tag in ```mcp code fence
+    const inference = mockInferenceClient('Here is the result:\n\n```mcp\n[MCP: n8n_list_workflows {}]\n```\n\nDone.');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+
+    const result = await agent.run({ message: 'List workflows', userId: 'test-user' });
+
+    expect(result.content).toContain('done');
+    expect(result.content).not.toContain('[MCP:');
+    expect(result.content).not.toContain('```');
+    expect(mockMcp.callTool).toHaveBeenCalledWith('n8n_list_workflows', {});
+  });
+
+  it('should unwrap CALC tags from markdown code blocks', async () => {
+    const inference = mockInferenceClient('Result:\n```\n[CALC: 5 * 10]\n```');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({ message: 'Calculate', userId: 'test-user' });
+
+    expect(result.content).toBe('Result:\n50');
+    expect(result.content).not.toContain('[CALC:');
+  });
+
+  it('should NOT unwrap code blocks without tool tags', async () => {
+    const inference = mockInferenceClient('Example:\n```json\n{"key": "value"}\n```');
+    const memory = mockMemoryProvider();
+    const agent = new AgentLoop(inference, memory, config);
+
+    const result = await agent.run({ message: 'Show JSON', userId: 'test-user' });
+
+    expect(result.content).toContain('```json');
+    expect(result.content).toContain('{"key": "value"}');
+  });
+
   it('should process mixed CALC, FETCH, and MCP tags', async () => {
     const originalFetch = globalThis.fetch;
     const encoder = new TextEncoder();

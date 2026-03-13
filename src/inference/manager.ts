@@ -79,9 +79,12 @@ export class InferenceManager {
       args.push('--mmproj', this.config.mmprojPath);
     }
 
-    // Disable thinking mode by default for stability with small models
+    // Always use --jinja for proper chat template handling
+    args.push('--jinja');
+
+    // Disable thinking/reasoning for stability with small models
     if (!this.config.thinkingMode) {
-      args.push('--jinja');
+      args.push('--reasoning', 'off');
     }
 
     console.log(`[micro-expert] Starting llama-server on port ${this._port}...`);

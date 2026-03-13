@@ -77,7 +77,17 @@ export class InferenceClient {
           throw new Error(`Inference failed (${res.status}): ${text}`);
         }
 
-        return await res.json() as ChatCompletionResponse;
+        const data = await res.json() as ChatCompletionResponse;
+
+        // Qwen3.5 with thinking enabled may put content in reasoning_content
+        // and leave content empty — use reasoning_content as fallback
+        for (const choice of data.choices) {
+          if (!choice.message.content && (choice.message as Record<string, unknown>).reasoning_content) {
+            choice.message.content = String((choice.message as Record<string, unknown>).reasoning_content);
+          }
+        }
+
+        return data;
       } catch (e) {
         if (attempt === 0 && isTransientError(e as Error)) {
           console.log('[micro-expert] Inference request failed, retrying with server restart...');

@@ -14,7 +14,7 @@ npm test
 
 1. Make changes in `src/` or `bin/`
 2. Run `npm run build` to compile TypeScript and copy UI assets
-3. Run `npm test` to verify all 15 tests pass
+3. Run `npm test` to verify all 119 tests pass
 4. Test manually with `node dist/bin/micro-expert.js serve --no-open`
 
 ### Watch Mode
@@ -66,7 +66,11 @@ npm test    # Run all tests once
 
 - **`tests/config.test.ts`** — Config loading, merging, env vars (5 tests)
 - **`tests/memory-provider.test.ts`** — Real RepoMemory in tmpdir (6 tests)
-- **`tests/agent-loop.test.ts`** — Mocked inference, pipeline verification (4 tests)
+- **`tests/agent-loop.test.ts`** — Mocked inference, pipeline verification, tool calls, code block unwrapping (24 tests)
+- **`tests/calculator.test.ts`** — Safe math evaluator (24 tests)
+- **`tests/http-tool.test.ts`** — FETCH tag parsing + security (32 tests)
+- **`tests/memory-export.test.ts`** — Export/import round-trip (8 tests)
+- **`tests/mcp-client.test.ts`** — MCP client: stdio + HTTP (20 tests)
 
 ### Writing Tests
 

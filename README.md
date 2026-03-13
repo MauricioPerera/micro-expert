@@ -132,6 +132,10 @@ micro-expert mcp-status
 | `micro-expert ask <query>` | One-shot question, prints answer and exits |
 | `micro-expert status` | Show model info, memory stats, config summary |
 | `micro-expert mcp-status` | Connect to all configured MCP servers, list available tools, disconnect |
+| `micro-expert export-memories` | Export memories and skills to a JSON file (v1 or v2 pack format) |
+| `micro-expert import-memories <file>` | Import memories from a JSON file |
+| `micro-expert install <source>` | Install a memory pack from a URL or local file |
+| `micro-expert mine` | Mine stored sessions to extract skills and memories using the local model |
 
 ### CLI Flags
 
@@ -179,6 +183,14 @@ Run the code tool with input "hello"
 ```
 
 All three tag types can appear in the same response and are processed sequentially (CALC → FETCH → MCP).
+
+#### Bracket-aware parsing
+
+MCP tags use a bracket-counting parser instead of regex. This correctly handles JSON arguments with nested brackets — for example, `"position": [250, 300]` inside a workflow definition won't prematurely close the tag.
+
+#### Code block unwrapping
+
+Small models sometimes wrap tool tags in markdown code fences (` ```mcp ... ``` `). MicroExpert automatically detects and unwraps tool tags from code blocks before processing. Only blocks containing tool tags are unwrapped — regular code blocks are left intact.
 
 ### Vision — Image Input
 
@@ -310,13 +322,137 @@ MicroExpert uses RepoMemory's CTT pipeline:
 
 2. **Recall** — When you ask a question, the hybrid retrieval engine runs TF-IDF keyword matching with composite scoring (relevance x decay x access frequency x correction boost). Results are injected into the system prompt *before* the model instruction for maximum attention from sub-1B models.
 
-3. **Profile** — User profiles are always included in recall (`includeProfile: true`), providing a consistent baseline of user information regardless of query keyword match.
+3. **Few-Shot from Memory** — Recalled memories containing tool patterns (`[MCP: ...]`, `[CALC: ...]`, `[FETCH: ...]`) are automatically converted into user/assistant conversation pairs and injected as few-shot examples before the user's message. This teaches the model tool-calling patterns *by example* rather than by instruction — critical for sub-1B models that respond poorly to abstract directions but reliably imitate demonstrated patterns. Up to 3 examples are injected per request to stay within context budget.
 
-4. **Mine** — A background process can analyze stored sessions to extract memories, patterns, and implicit knowledge using the local model.
+4. **Profile** — User profiles are always included in recall (`includeProfile: true`), providing a consistent baseline of user information regardless of query keyword match.
 
-5. **Correct** — The Correction Boost mechanism tracks corrections to the agent's output. Memories associated with improvements get boosted; those leading to errors get suppressed.
+5. **Mine** — The local model analyzes stored sessions and automatically extracts structured memories, skills, and patterns. Mining happens in two modes:
+   - **Auto-mining** — Every session is mined automatically after being saved (when `serve` or `chat` is running). The same llama-server that handles inference also powers the mining extraction.
+   - **Manual mining** — `micro-expert mine` processes stored sessions on demand. Useful for mining historical sessions or after importing conversations.
+
+   Mining is what makes skills **self-generating**: the model observes repeated tool-calling patterns in sessions and crystallizes them into skill memories. These skills are then recalled as few-shot examples in future interactions, creating a virtuous cycle.
+
+6. **Correct** — The Correction Boost mechanism tracks corrections to the agent's output. Memories associated with improvements get boosted; those leading to errors get suppressed.
 
 Over time, the agent builds a compressed, curated representation of your context that fits in a sub-1B model's context window. The memory is the model's experience.
+
+### Teaching the Model New Skills
+
+You can teach MicroExpert to use new tools by saving skill memories. When the model sees these skills recalled as few-shot examples, it imitates the pattern:
+
+```bash
+# Save a skill memory via the API
+curl -X POST http://127.0.0.1:3333/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "/save_memory Para listar workflows de n8n: [MCP: n8n_list_workflows {}]"}]}'
+```
+
+Or programmatically:
+
+```typescript
+memory.saveMemory('local',
+  'El usuario pide crear un workflow en n8n. Respuesta correcta: [MCP: n8n_create_workflow {"name": "My Workflow", "nodes": [...], "connections": {}, "settings": {}}]',
+  'mcp-skill',
+  ['n8n', 'mcp', 'create', 'workflow']
+);
+```
+
+The next time a user asks to create a workflow, recall will find this memory, extract it as a few-shot example (user: "crear un workflow en n8n" → assistant: `[MCP: n8n_create_workflow {...}]`), and inject it into the conversation. The model then imitates the pattern with the user's specific parameters.
+
+This mechanism is **model-agnostic** — the same skills work across different model sizes (tested with both 0.8B and 2B Qwen3.5).
+
+### Memory Packs — Solving Cold Start
+
+Memory Packs are distributable JSON files containing memories and skills that can be shared via GitHub, downloaded via URL, and installed with a single command. They solve the **cold-start problem** — a fresh MicroExpert instance can immediately use MCP tools, follow domain conventions, and recall learned patterns without any prior interaction.
+
+#### Pack Format (v2)
+
+```json
+{
+  "version": 2,
+  "exportedAt": "2026-03-13T...",
+  "userId": "local",
+  "agentId": "micro-expert",
+  "count": 5,
+  "pack": {
+    "name": "n8n MCP Skills",
+    "description": "Tool-calling skills for n8n workflow automation",
+    "author": "MicroExpert",
+    "packVersion": "1.0.0",
+    "models": ["qwen3.5-0.8b", "qwen3.5-2b"],
+    "packTags": ["n8n", "mcp", "workflow"]
+  },
+  "memories": [
+    { "content": "General knowledge...", "category": "fact", "tags": ["topic"] }
+  ],
+  "skills": [
+    { "content": "To list workflows: [MCP: n8n_list_workflows {}]", "category": "mcp-skill", "tags": ["n8n"] }
+  ]
+}
+```
+
+Skills are memories that contain tool-calling patterns (`[MCP: ...]`, `[CALC: ...]`, `[FETCH: ...]`). On import, they're stored as regular memories but on recall, they're automatically extracted as few-shot conversation examples.
+
+#### Creating a Pack
+
+```bash
+# Export with pack metadata (creates v2 format)
+micro-expert export-memories \
+  --pack-name "n8n MCP Skills" \
+  --pack-desc "Tool-calling skills for n8n workflow automation" \
+  --pack-author "YourName" \
+  --pack-version "1.0.0" \
+  --pack-models "qwen3.5-0.8b,qwen3.5-2b" \
+  --pack-tags "n8n,mcp,automation" \
+  --output n8n-skills.json
+
+# Export without metadata (auto-detects v2 if skills exist, otherwise v1)
+micro-expert export-memories --output my-memories.json
+```
+
+#### Installing a Pack
+
+```bash
+# From a local file
+micro-expert install n8n-skills.json
+
+# From a URL (GitHub raw, any HTTP endpoint)
+micro-expert install https://raw.githubusercontent.com/user/repo/main/packs/n8n-skills.json
+
+# Import to a specific user
+micro-expert install n8n-skills.json --userId alice
+```
+
+#### API Endpoints
+
+```bash
+# Export (downloads as JSON file)
+GET /v1/memories/export?userId=local
+
+# Import (accepts v1 or v2 format)
+POST /v1/memories/import?userId=local
+Content-Type: application/json
+Body: <MemoryExportFile>
+```
+
+#### Catalog Idea
+
+Packs can be published as JSON files in a GitHub repository, organized by domain:
+
+```
+micro-expert-packs/
+├── packs/
+│   ├── n8n-mcp-skills.json       # n8n workflow automation
+│   ├── github-mcp-skills.json    # GitHub API via MCP
+│   ├── postgres-mcp-skills.json  # PostgreSQL queries via MCP
+│   └── math-skills.json          # Advanced CALC patterns
+└── README.md                     # Pack catalog with descriptions
+```
+
+Users install packs with a single command:
+```bash
+micro-expert install https://raw.githubusercontent.com/.../packs/n8n-mcp-skills.json
+```
 
 ---
 
@@ -400,10 +536,10 @@ micro-expert/
 ├── tests/
 │   ├── config.test.ts               # Config loading (5 tests)
 │   ├── memory-provider.test.ts      # Memory operations (6 tests)
-│   ├── agent-loop.test.ts           # Agent pipeline + tool calls (20 tests)
+│   ├── agent-loop.test.ts           # Agent pipeline + tool calls (24 tests)
 │   ├── calculator.test.ts           # Safe math evaluator (24 tests)
 │   ├── http-tool.test.ts            # FETCH tag parsing + security (32 tests)
-│   ├── memory-export.test.ts        # Export/import round-trip (8 tests)
+│   ├── memory-export.test.ts        # Export/import round-trip, v2 packs (11 tests)
 │   └── mcp-client.test.ts          # MCP client: stdio + HTTP (20 tests)
 ├── package.json
 ├── tsconfig.json
@@ -421,7 +557,7 @@ git clone https://github.com/MauricioPerera/micro-expert.git
 cd micro-expert
 npm install
 npm run build       # Compile TypeScript + copy UI assets
-npm test            # Run all 115 tests (7 suites)
+npm test            # Run all 122 tests (7 suites)
 npm run dev         # TypeScript watch mode
 npm start           # Start server (micro-expert serve)
 ```
@@ -460,7 +596,7 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | **Inference** | `llama-server` from llama.cpp (spawned on-demand) |
 | **MCP** | `@modelcontextprotocol/sdk` (stdio) + custom `HttpMcpClient` (HTTP/SSE) |
 | **CLI** | `commander` |
-| **Tests** | `vitest` (115 tests across 7 suites) |
+| **Tests** | `vitest` (122 tests across 7 suites) |
 | **Frontend** | Vanilla HTML/CSS/JS (zero dependencies, ~15KB) |
 
 ---
@@ -470,7 +606,8 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | Model | Size | Use case |
 |---|---|---|
 | **Qwen2.5-0.5B-Instruct** (Q4_K_M) | ~469 MB | Default — good balance of quality and speed |
-| **Qwen3.5-0.8B** (Q4_K_M) | ~508 MB | Upgrade option — better reasoning, supports thinking mode |
+| **Qwen3.5-0.8B** (Q4_K_M) | ~508 MB | Upgrade — better reasoning, vision, supports thinking mode |
+| **Qwen3.5-2B** (Q4_K_M) | ~1.2 GB | Best quality — more consistent tool calling, vision capable |
 | **Gemma 3 270M** (Q4_K_M) | ~170 MB | `--light` — minimal footprint, faster inference |
 
 ### Thinking Mode (Qwen3.5)
@@ -505,7 +642,7 @@ MicroExpert includes several safety measures for local operation:
 
 - [ ] `micro-expert index <path>` — ingest a codebase into memory
 - [ ] MCP server mode — expose as a tool for Claude Code, Cursor, etc.
-- [ ] Auto-mining — automatically extract memories from sessions during idle time
+- [x] Auto-mining — automatically extract memories and skills from sessions using the local model
 - [ ] Multi-model support — swap models per task type
 - [ ] Metrics dashboard — visualize memory growth, recall accuracy, correction rate
 

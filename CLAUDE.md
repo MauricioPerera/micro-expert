@@ -24,17 +24,17 @@ Single Node.js process with:
 
 ```bash
 npm run build       # Compile TypeScript + copy UI assets to dist/
-npm test            # Run tests (115 tests, 7 suites)
+npm test            # Run tests (122 tests, 7 suites)
 npm start           # Start server (micro-expert serve)
 npm run dev         # TypeScript watch mode
 ```
 
 ## Agent Pipeline
 
-1. `memory.recall(query, userId)` — retrieve CTT context + profile
-2. `buildMessages()` — context FIRST in system prompt (sub-1B attention optimization), date/time context, tool instructions
+1. `memory.recall(query, userId)` — retrieve CTT context + profile + few-shot examples
+2. `buildMessages()` — context FIRST in system prompt, few-shot examples as user/assistant turns, then history
 3. `inference.chatCompletion(messages)` — send to llama-server
-4. `processToolCalls(content)` — detect `[CALC: expr]`, `[FETCH: METHOD url]`, and `[MCP: tool args]` tags, execute, replace with results
+4. `processToolCalls(content)` — unwrap code blocks, then detect `[CALC: expr]`, `[FETCH: METHOD url]`, and `[MCP: tool args]` tags, execute, replace with results
 5. `memory.saveSession(userId, [user, assistant])` — persist the turn (with resolved tool results)
 
 Key design decisions:
@@ -45,7 +45,10 @@ Key design decisions:
 - Tool calling via tag-based format — sub-1B models can't do native function calling
 - `[CALC: expr]` — safe math evaluator (recursive descent parser, no `eval()`)
 - `[FETCH: METHOD url]` — HTTP requests with security (blocked hosts, timeout, size limits)
-- `[MCP: tool_name {"arg": "val"}]` — call tools from external MCP servers
+- `[MCP: tool_name {"arg": "val"}]` — call tools from external MCP servers (bracket-aware parser, not regex — handles nested `[]` in JSON args)
+- `unwrapCodeBlocks()` — preprocessor that extracts tool tags from markdown code fences (small models often wrap tags in ` ```mcp ``` ` blocks)
+- Few-shot from memory — recalled memories containing tool patterns are auto-converted to user/assistant conversation pairs and injected before history (sub-1B models imitate patterns better than following abstract instructions)
+- `extractFewShotExamples()` in `provider.ts` parses recalled text, extracts tool tags with bracket-aware matching, derives user questions from surrounding text, returns max 3 examples
 - MCP client supports two transport modes:
   - **stdio** — subprocess-based via MCP SDK `StdioClientTransport` (for local CLI servers)
   - **HTTP** — custom `HttpMcpClient` using `node:http` (for remote servers like n8n that speak Streamable HTTP/SSE)
@@ -53,7 +56,14 @@ Key design decisions:
 - Custom `headers` field for HTTP-based transports (e.g., `Authorization: Bearer ...`)
 - SDK SSE/StreamableHTTP transports hang on Windows — `HttpMcpClient` reads first SSE event and destroys stream
 - MCP servers configured in `~/.micro-expert/config.json` under `mcpServers` (same format as claude_desktop_config.json)
-- Memory import/export via API endpoints and CLI commands
+- Memory import/export via API endpoints and CLI commands (v1 flat, v2 pack with skills + metadata)
+- Memory Packs (v2): distributable JSON files with `pack` metadata, `memories`, and `skills` arrays — solves cold-start
+- `isSkillEntry()` detects skill memories by category (`mcp-skill`, `mcp-tools`, `skill`, `mcp-format`) + tool patterns
+- `micro-expert install <url-or-file>` — downloads and imports packs from URL or local file
+- Auto-mining: `MemoryProvider` accepts optional `AiProvider` → enables `autoMine: true` in RepoMemory
+- `LlamaAiProvider` in `memory/ai-provider.ts` — adapts `InferenceClient` to RepoMemory's `AiProvider` interface
+- `micro-expert mine` CLI — manually mines stored sessions to extract skills/memories
+- Mining pipeline: session saved → RepoMemory auto-mines → extracts memories/skills → available on next recall
 - Thinking mode: Qwen3.5 emits `<think>...</think>` blocks; disabled by default via `/no_think` in system prompt
 - `stripThinkingTokens()` in `loop.ts` removes thinking blocks from non-streaming responses
 - `stripThinking()` in `index.html` removes thinking blocks client-side during streaming
@@ -127,10 +137,10 @@ Key design decisions:
 Tests in `tests/`:
 - `config.test.ts` — defaults, CLI overrides, env vars, priority (5 tests)
 - `memory-provider.test.ts` — recall, sessions, search, stats (6 tests)
-- `agent-loop.test.ts` — pipeline, streaming, history, date/time, CALC/FETCH/MCP tool calls (20 tests)
+- `agent-loop.test.ts` — pipeline, streaming, history, date/time, CALC/FETCH/MCP tool calls, nested brackets, code block unwrapping (24 tests)
 - `calculator.test.ts` — safe math evaluator: arithmetic, precedence, functions, errors (24 tests)
 - `http-tool.test.ts` — FETCH tag parsing, URL validation, security, execution (32 tests)
-- `memory-export.test.ts` — export/import round-trip, validation, error handling (8 tests)
+- `memory-export.test.ts` — export/import round-trip, validation, error handling, v2 pack format (11 tests)
 - `mcp-client.test.ts` — MCP client: stdio connect, HTTP connect, tool discovery, calling, disconnect, prompt generation, transport selection, error handling (20 tests)
 
 Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport + HttpMcpClient.

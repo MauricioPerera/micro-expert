@@ -8,6 +8,7 @@ import { InferenceClient } from '../src/inference/client.js';
 import { AgentLoop } from '../src/agent/loop.js';
 import { ToolRegistry, registerBuiltinTools } from '../src/agent/tools.js';
 import { McpClientManager } from '../src/mcp/index.js';
+import { LlamaAiProvider } from '../src/memory/ai-provider.js';
 import { createServer } from '../src/server/http.js';
 import { runSetup } from '../src/setup/wizard.js';
 
@@ -197,9 +198,16 @@ program
 // --- export-memories ---
 program
   .command('export-memories')
-  .description('Export all memories to a JSON file')
+  .description('Export memories to a JSON file (v1 flat or v2 pack format)')
   .option('--userId <id>', 'User ID to export memories for')
   .option('--output <path>', 'Output file path (default: memories-<userId>.json)')
+  .option('--pack-name <name>', 'Pack name (enables v2 format for catalog publishing)')
+  .option('--pack-desc <desc>', 'Pack description')
+  .option('--pack-author <author>', 'Pack author')
+  .option('--pack-version <ver>', 'Pack version (e.g., 1.0.0)')
+  .option('--pack-url <url>', 'Pack source URL')
+  .option('--pack-models <models>', 'Compatible models (comma-separated, e.g., "qwen3.5-0.8b,qwen3.5-2b")')
+  .option('--pack-tags <tags>', 'Pack tags for catalog search (comma-separated)')
   .action(async (opts) => {
     const globalOpts = program.opts();
     const config = loadConfig({
@@ -210,13 +218,30 @@ program
     const memory = new MemoryProvider(config);
 
     try {
-      const exported = memory.exportMemories(userId);
+      // Build pack metadata if any pack option is provided
+      const hasPack = opts.packName || opts.packDesc || opts.packAuthor;
+      const packMeta = hasPack ? {
+        name: opts.packName ?? 'Unnamed Pack',
+        description: opts.packDesc ?? '',
+        author: opts.packAuthor,
+        packVersion: opts.packVersion,
+        url: opts.packUrl,
+        models: opts.packModels?.split(',').map((m: string) => m.trim()),
+        packTags: opts.packTags?.split(',').map((t: string) => t.trim()),
+      } : undefined;
+
+      const exported = memory.exportMemories(userId, packMeta);
       const outputPath = opts.output ?? `memories-${userId}.json`;
 
       const { writeFileSync } = await import('node:fs');
       writeFileSync(outputPath, JSON.stringify(exported, null, 2));
 
-      console.log(`✅ Exported ${exported.count} memories to ${outputPath}`);
+      const skillCount = exported.skills?.length ?? 0;
+      const memCount = exported.memories.length;
+      console.log(`✅ Exported ${exported.count} items (${memCount} memories, ${skillCount} skills) to ${outputPath}`);
+      if (exported.pack?.name) {
+        console.log(`   Pack: "${exported.pack.name}" v${exported.pack.packVersion ?? '0.0.0'}`);
+      }
     } catch (e) {
       console.error(`Error: ${(e as Error).message}`);
       process.exitCode = 1;
@@ -228,7 +253,7 @@ program
 // --- import-memories ---
 program
   .command('import-memories <file>')
-  .description('Import memories from a JSON file')
+  .description('Import memories from a JSON file (v1 or v2 format)')
   .option('--userId <id>', 'User ID to import memories for')
   .action(async (file, opts) => {
     const globalOpts = program.opts();
@@ -248,6 +273,9 @@ program
 
       console.log(`✅ Import complete:`);
       console.log(`   Imported: ${result.imported}`);
+      if (result.skills > 0) {
+        console.log(`   Skills: ${result.skills}`);
+      }
       if (result.errors > 0) {
         console.log(`   Errors: ${result.errors}`);
       }
@@ -255,6 +283,119 @@ program
       console.error(`Error: ${(e as Error).message}`);
       process.exitCode = 1;
     } finally {
+      memory.dispose();
+    }
+  });
+
+// --- install (download + import from URL) ---
+program
+  .command('install <source>')
+  .description('Install a memory pack from a URL or local file')
+  .option('--userId <id>', 'User ID to import for')
+  .action(async (source, opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const userId = opts.userId ?? config.defaultUserId;
+    const memory = new MemoryProvider(config);
+
+    try {
+      let raw: string;
+
+      if (source.startsWith('http://') || source.startsWith('https://')) {
+        // Download from URL (supports GitHub raw URLs)
+        console.log(`📦 Downloading pack from ${source}...`);
+        const res = await fetch(source, { signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        raw = await res.text();
+      } else {
+        // Local file
+        const { readFileSync } = await import('node:fs');
+        raw = readFileSync(source, 'utf-8');
+      }
+
+      const data = JSON.parse(raw);
+      const result = memory.importMemories(userId, data);
+
+      const packName = data.pack?.name ?? source;
+      console.log(`✅ Installed "${packName}":`);
+      console.log(`   Imported: ${result.imported}`);
+      if (result.skills > 0) {
+        console.log(`   Skills: ${result.skills}`);
+      }
+      if (result.errors > 0) {
+        console.log(`   Errors: ${result.errors}`);
+      }
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      memory.dispose();
+    }
+  });
+
+// --- mine (extract skills from stored sessions) ---
+program
+  .command('mine')
+  .description('Mine stored sessions to extract skills and memories using the local model')
+  .option('--userId <id>', 'User ID to mine sessions for')
+  .option('--limit <n>', 'Max sessions to mine (default: 10)', '10')
+  .action(async (opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const userId = opts.userId ?? config.defaultUserId;
+    const limit = parseInt(opts.limit, 10) || 10;
+
+    // Mining requires inference — start the model
+    const inference = new InferenceManager(config);
+    const client = new InferenceClient(inference);
+    const aiProvider = new LlamaAiProvider(client);
+    const memory = new MemoryProvider(config, aiProvider);
+
+    try {
+      await inference.start();
+
+      // List sessions and mine un-mined ones
+      const sessions = memory.getHistory(userId, 100);
+      console.log(`Found ${sessions.length} session(s) for user "${userId}"`);
+
+      let mined = 0;
+      let totalMemories = 0;
+      let totalSkills = 0;
+
+      for (const session of sessions) {
+        if (mined >= limit) break;
+
+        try {
+          console.log(`  Mining session ${session.id}...`);
+          const result = await memory.mine(session.id);
+          totalMemories += result.memories;
+          totalSkills += result.skills;
+          mined++;
+
+          if (result.memories > 0 || result.skills > 0) {
+            console.log(`    → ${result.memories} memories, ${result.skills} skills`);
+          } else {
+            console.log(`    → nothing extracted`);
+          }
+        } catch (e) {
+          console.error(`    → error: ${(e as Error).message}`);
+        }
+      }
+
+      console.log(`\n✅ Mined ${mined} session(s):`);
+      console.log(`   Memories extracted: ${totalMemories}`);
+      console.log(`   Skills extracted: ${totalSkills}`);
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      inference.stop();
       memory.dispose();
     }
   });
@@ -316,9 +457,16 @@ program.parse();
 // --- Helpers ---
 
 async function initComponents(config: MicroExpertConfig) {
-  const memory = new MemoryProvider(config);
   const inference = new InferenceManager(config);
   const client = new InferenceClient(inference);
+
+  // Create AI provider for auto-mining (uses the same llama-server)
+  const aiProvider = new LlamaAiProvider(client);
+  const memory = new MemoryProvider(config, aiProvider);
+  if (memory.isMiningEnabled) {
+    console.log('[micro-expert] Auto-mining enabled — skills will be extracted from sessions');
+  }
+
   const tools = new ToolRegistry();
   registerBuiltinTools(tools, memory);
 
