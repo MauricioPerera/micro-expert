@@ -24,7 +24,7 @@ Single Node.js process with:
 
 ```bash
 npm run build       # Compile TypeScript + copy UI assets to dist/
-npm test            # Run tests (122 tests, 7 suites)
+npm test            # Run tests (168 tests, 10 suites)
 npm start           # Start server (micro-expert serve)
 npm run dev         # TypeScript watch mode
 ```
@@ -63,6 +63,8 @@ Key design decisions:
 - Auto-mining: `MemoryProvider` accepts optional `AiProvider` → enables `autoMine: true` in RepoMemory
 - `LlamaAiProvider` in `memory/ai-provider.ts` — adapts `InferenceClient` to RepoMemory's `AiProvider` interface
 - `micro-expert mine` CLI — manually mines stored sessions to extract skills/memories
+- `micro-expert seed` CLI — auto-generates skill seeds from MCP tool metadata (artificial experience)
+- `generateSkillSeeds()` in `memory/seed.ts` — creates skill + format-reference memories from `McpToolInfo[]`
 - Mining pipeline: session saved → RepoMemory auto-mines → extracts memories/skills → available on next recall
 - Thinking mode: Qwen3.5 emits `<think>...</think>` blocks; disabled by default via `/no_think` in system prompt
 - `stripThinkingTokens()` in `loop.ts` removes thinking blocks from non-streaming responses
@@ -70,9 +72,19 @@ Key design decisions:
 - Vision support: `image` field in AgentRequest sends base64 data URL as `image_url` content part
 - Vision requires mmproj GGUF file; `mmprojPath` config auto-detects `mmproj*.gguf` in same dir as model
 - `detectMmproj()` in `config.ts` prefers F16 > BF16 > F32; InferenceManager passes `--mmproj` to llama-server
-- Security: 10MB body limit in `readBody()` (supports base64 images), 5min SSE timeout, config validation, promise mutex in InferenceManager
+- Web UI settings panel: temperature/maxTokens/topP sliders, custom system prompt textarea, model selector dropdown
+- `AgentRequest` supports per-request overrides: `temperature`, `maxTokens`, `topP`, `systemPrompt`
+- API accepts `temperature`, `max_tokens`, `top_p`, `system_prompt` in chat completion body
+- `GET /v1/config` returns current defaults; `GET /v1/models/available` lists GGUF files; `POST /v1/models/switch` hot-swaps model
+- `TextMessage` (memory) vs `ChatMessage` (inference) — separated to avoid type confusion (vision support in ChatMessage)
+- Security: 10MB body limit in `readBody()` (supports base64 images), 5min SSE timeout, config validation, message field validation, promise mutex in InferenceManager
 - Streaming: `reasoning_content` from llama-server wrapped in `<think>` tags so client-side stripping handles it
 - Transient error retry: `isTransientError()` in `client.ts` catches ECONNREFUSED/ECONNRESET/socket hang up
+- Telegram bot: `TelegramBot` class in `src/telegram/bot.ts` — long polling via `node:https`, no external deps
+- Telegram: `getUpdates` with 30s timeout, exponential backoff on errors, per-user conversation history (10 turns)
+- Telegram: photo support (downloads largest resolution, converts to base64 data URL), user allowlist, message splitting at 4096 chars
+- Telegram config: `telegram.botToken` + optional `telegram.allowedUsers` in config.json
+- CLI: `micro-expert telegram [--token <token>]` — starts bot with graceful shutdown (SIGINT/SIGTERM)
 
 ## Conventions
 
@@ -142,5 +154,8 @@ Tests in `tests/`:
 - `http-tool.test.ts` — FETCH tag parsing, URL validation, security, execution (32 tests)
 - `memory-export.test.ts` — export/import round-trip, validation, error handling, v2 pack format (11 tests)
 - `mcp-client.test.ts` — MCP client: stdio connect, HTTP connect, tool discovery, calling, disconnect, prompt generation, transport selection, error handling (20 tests)
+- `seed.test.ts` — seed generator: skill generation, format references, example values, tags, edge cases (7 tests)
+- `telegram-bot.test.ts` — Telegram bot: splitMessage, constructor, start/stop, message handling, auth, history, errors (20 tests)
+- `routes.test.ts` — API routes: /health, /v1/config, /v1/models, /v1/chat/completions, /v1/memories/*, validation (19 tests)
 
-Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport + HttpMcpClient.
+Memory tests use real RepoMemory in MEMORY_DIR. Agent tests mock InferenceClient. HTTP tests mock global fetch. MCP tests mock SDK Client/Transport + HttpMcpClient. Telegram tests mock node:https. Routes tests mock RouteContext.

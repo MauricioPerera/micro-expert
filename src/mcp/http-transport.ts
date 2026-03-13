@@ -186,11 +186,10 @@ export class HttpMcpClient {
         },
         (res) => {
           // Just drain the response
+          const killTimer = setTimeout(() => { try { res.destroy(); } catch {} resolve(); }, 2000);
           res.on('data', () => {});
-          res.on('end', () => resolve());
-          res.on('error', () => resolve());
-          // In case server keeps connection open
-          setTimeout(() => { try { res.destroy(); } catch {} resolve(); }, 2000);
+          res.on('end', () => { clearTimeout(killTimer); resolve(); });
+          res.on('error', () => { clearTimeout(killTimer); resolve(); });
         },
       );
 

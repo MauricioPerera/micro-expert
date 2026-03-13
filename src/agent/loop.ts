@@ -1,7 +1,6 @@
 import type { InferenceClient, ChatMessage, StreamDelta } from '../inference/client.js';
 import type { MemoryProvider, FewShotExample } from '../memory/provider.js';
 import type { MicroExpertConfig } from '../config.js';
-import type { ToolRegistry } from './tools.js';
 import type { McpClientManager } from '../mcp/index.js';
 import { safeEvaluate } from './tools.js';
 import { parseFetchTag, executeFetch } from './http-tool.js';
@@ -15,6 +14,14 @@ export interface AgentRequest {
   history?: ChatMessage[];
   /** Image data as base64 data URL (optional, for vision) */
   image?: string;
+  /** Override temperature for this request (falls back to config default) */
+  temperature?: number;
+  /** Override max tokens for this request (falls back to config default) */
+  maxTokens?: number;
+  /** Override top_p for this request (falls back to config default) */
+  topP?: number;
+  /** Custom system prompt (replaces the default MicroExpert system prompt) */
+  systemPrompt?: string;
 }
 
 export interface AgentResponse {
@@ -40,20 +47,17 @@ export class AgentLoop {
   private readonly inference: InferenceClient;
   private readonly memory: MemoryProvider;
   private readonly config: MicroExpertConfig;
-  private readonly tools?: ToolRegistry;
   private readonly mcp?: McpClientManager;
 
   constructor(
     inference: InferenceClient,
     memory: MemoryProvider,
     config: MicroExpertConfig,
-    tools?: ToolRegistry,
     mcp?: McpClientManager,
   ) {
     this.inference = inference;
     this.memory = memory;
     this.config = config;
-    this.tools = tools;
     this.mcp = mcp;
   }
 
@@ -67,11 +71,11 @@ export class AgentLoop {
     // 2. Build messages (with few-shot examples from memory)
     const messages = this.buildMessages(request, recall.formatted, recall.fewShot);
 
-    // 3. Infer
+    // 3. Infer (per-request overrides take priority over config defaults)
     const response = await this.inference.chatCompletion(messages, {
-      maxTokens: this.config.maxTokens,
-      temperature: this.config.temperature,
-      topP: this.config.topP,
+      maxTokens: request.maxTokens ?? this.config.maxTokens,
+      temperature: request.temperature ?? this.config.temperature,
+      topP: request.topP ?? this.config.topP,
     });
 
     let content = response.choices[0]?.message?.content ?? '';
@@ -114,15 +118,18 @@ export class AgentLoop {
     let fullContent = '';
 
     for await (const delta of this.inference.chatCompletionStream(messages, {
-      maxTokens: this.config.maxTokens,
-      temperature: this.config.temperature,
-      topP: this.config.topP,
+      maxTokens: request.maxTokens ?? this.config.maxTokens,
+      temperature: request.temperature ?? this.config.temperature,
+      topP: request.topP ?? this.config.topP,
     })) {
       fullContent += delta.content;
       yield delta;
     }
 
-    // 4. Save session after stream completes
+    // 4. Process tool calls on accumulated content (so memory stores resolved results)
+    fullContent = await this.processToolCalls(fullContent);
+
+    // 5. Save session after stream completes
     const streamSessionId = this.memory.saveSession(request.userId, [
       { role: 'user', content: request.message },
       { role: 'assistant', content: fullContent },
@@ -233,7 +240,15 @@ export class AgentLoop {
     // Disable thinking mode for Qwen3.5 when not explicitly enabled
     const noThink = !this.config.thinkingMode ? '\n/no_think' : '';
 
-    if (context.trim()) {
+    if (request.systemPrompt) {
+      // Custom system prompt — prepend context and date, append tool instructions
+      systemContent = context.trim()
+        ? `${context}\n\n${dateContext}\n\n${request.systemPrompt}`
+        : `${dateContext}\n\n${request.systemPrompt}`;
+      systemContent += `\n${calcInstruction}\n${fetchInstruction}`;
+      if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
+      systemContent += noThink;
+    } else if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
       systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}`;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;

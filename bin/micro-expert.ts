@@ -6,11 +6,12 @@ import { MemoryProvider } from '../src/memory/provider.js';
 import { InferenceManager } from '../src/inference/manager.js';
 import { InferenceClient } from '../src/inference/client.js';
 import { AgentLoop } from '../src/agent/loop.js';
-import { ToolRegistry, registerBuiltinTools } from '../src/agent/tools.js';
 import { McpClientManager } from '../src/mcp/index.js';
 import { LlamaAiProvider } from '../src/memory/ai-provider.js';
+import { generateSkillSeeds } from '../src/memory/seed.js';
 import { createServer } from '../src/server/http.js';
 import { runSetup } from '../src/setup/wizard.js';
+import { TelegramBot } from '../src/telegram/bot.js';
 
 const program = new Command();
 
@@ -208,6 +209,8 @@ program
   .option('--pack-url <url>', 'Pack source URL')
   .option('--pack-models <models>', 'Compatible models (comma-separated, e.g., "qwen3.5-0.8b,qwen3.5-2b")')
   .option('--pack-tags <tags>', 'Pack tags for catalog search (comma-separated)')
+  .option('--filter <query>', 'Export only memories matching this search query (e.g., "n8n workflow")')
+  .option('--tags <tags>', 'Export only memories with these tags (comma-separated, e.g., "n8n,mcp")')
   .action(async (opts) => {
     const globalOpts = program.opts();
     const config = loadConfig({
@@ -230,7 +233,14 @@ program
         packTags: opts.packTags?.split(',').map((t: string) => t.trim()),
       } : undefined;
 
-      const exported = memory.exportMemories(userId, packMeta);
+      // Build filter if query or tags are provided
+      const hasFilter = opts.filter || opts.tags;
+      const filter = hasFilter ? {
+        query: opts.filter,
+        tags: opts.tags?.split(',').map((t: string) => t.trim()),
+      } : undefined;
+
+      const exported = memory.exportMemories(userId, packMeta, filter);
       const outputPath = opts.output ?? `memories-${userId}.json`;
 
       const { writeFileSync } = await import('node:fs');
@@ -239,6 +249,9 @@ program
       const skillCount = exported.skills?.length ?? 0;
       const memCount = exported.memories.length;
       console.log(`✅ Exported ${exported.count} items (${memCount} memories, ${skillCount} skills) to ${outputPath}`);
+      if (filter) {
+        console.log(`   Filter: ${filter.query ? `query="${filter.query}"` : ''}${filter.tags ? ` tags=[${filter.tags.join(', ')}]` : ''}`);
+      }
       if (exported.pack?.name) {
         console.log(`   Pack: "${exported.pack.name}" v${exported.pack.packVersion ?? '0.0.0'}`);
       }
@@ -400,6 +413,92 @@ program
     }
   });
 
+// --- seed (generate artificial experience from MCP tool metadata) ---
+program
+  .command('seed')
+  .description('Generate skill memories from MCP tool metadata (artificial experience)')
+  .option('--output <path>', 'Export generated seeds to a file instead of saving to memory')
+  .option('--userId <id>', 'User ID to save seeds for')
+  .option('--pack-name <name>', 'Pack name when exporting')
+  .option('--dry-run', 'Show what would be generated without saving')
+  .action(async (opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const serverNames = Object.keys(config.mcpServers);
+    if (serverNames.length === 0) {
+      console.log('No MCP servers configured. Add servers to ~/.micro-expert/config.json.');
+      return;
+    }
+
+    // Connect to MCP servers to discover tools
+    const mcp = new McpClientManager();
+    try {
+      await mcp.connectAll(config.mcpServers);
+      const tools = mcp.listTools();
+
+      if (tools.length === 0) {
+        console.log('No tools found from MCP servers.');
+        return;
+      }
+
+      console.log(`Found ${tools.length} tool(s) from ${serverNames.length} server(s)\n`);
+
+      // Generate seeds
+      const seeds = generateSkillSeeds(tools);
+      console.log(`Generated ${seeds.length} skill seed(s)\n`);
+
+      if (opts.dryRun) {
+        // Dry run — just display
+        for (const seed of seeds) {
+          console.log(`  [${seed.category}] ${seed.content.slice(0, 120)}${seed.content.length > 120 ? '...' : ''}`);
+        }
+        return;
+      }
+
+      if (opts.output) {
+        // Export as pack file
+        const packData = {
+          version: 2,
+          count: seeds.length,
+          pack: {
+            name: opts.packName ?? `MCP Seeds — ${serverNames.join(', ')}`,
+            description: `Auto-generated skill seeds from MCP tool metadata`,
+            generatedAt: new Date().toISOString(),
+          },
+          memories: [] as unknown[],
+          skills: seeds,
+        };
+
+        const { writeFileSync } = await import('node:fs');
+        writeFileSync(opts.output, JSON.stringify(packData, null, 2));
+        console.log(`✅ Exported ${seeds.length} seeds to ${opts.output}`);
+      } else {
+        // Save directly to memory
+        const userId = opts.userId ?? config.defaultUserId;
+        const memory = new MemoryProvider(config);
+
+        try {
+          let saved = 0;
+          for (const seed of seeds) {
+            memory.saveMemory(userId, seed.content, seed.category, seed.tags);
+            saved++;
+          }
+          console.log(`✅ Saved ${saved} seed(s) to memory for user "${userId}"`);
+        } finally {
+          memory.dispose();
+        }
+      }
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      await mcp.disconnectAll();
+    }
+  });
+
 // --- mcp-status ---
 program
   .command('mcp-status')
@@ -451,6 +550,56 @@ program
     }
   });
 
+// --- telegram ---
+program
+  .command('telegram')
+  .description('Start the Telegram bot (interact with MicroExpert via Telegram chat)')
+  .option('--token <token>', 'Telegram bot token (overrides config)')
+  .action(async (opts) => {
+    const globalOpts = program.opts();
+    const config = loadConfig({
+      modelPath: globalOpts.model,
+    });
+
+    const token = opts.token ?? config.telegram?.botToken;
+    if (!token) {
+      console.error('Error: No Telegram bot token provided.');
+      console.error('Options:');
+      console.error('  --token <token>');
+      console.error('  MICRO_EXPERT_TELEGRAM_TOKEN=<token>');
+      console.error('  ~/.micro-expert/config.json: { "telegram": { "botToken": "..." } }');
+      process.exitCode = 1;
+      return;
+    }
+
+    const { memory, agent, inference, mcp } = await initComponents(config);
+    const bot = new TelegramBot(agent, token, config.telegram?.allowedUsers);
+
+    try {
+      await bot.start();
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      inference.stop();
+      memory.dispose();
+      await mcp?.disconnectAll().catch(() => {});
+      process.exitCode = 1;
+      return;
+    }
+
+    // Graceful shutdown
+    const shutdown = () => {
+      console.log('\n[micro-expert] Shutting down Telegram bot...');
+      bot.stop();
+      mcp?.disconnectAll().catch(() => {});
+      inference.stop();
+      memory.dispose();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  });
+
 // --- Parse and run ---
 program.parse();
 
@@ -467,9 +616,6 @@ async function initComponents(config: MicroExpertConfig) {
     console.log('[micro-expert] Auto-mining enabled — skills will be extracted from sessions');
   }
 
-  const tools = new ToolRegistry();
-  registerBuiltinTools(tools, memory);
-
   // MCP client setup — connect to configured MCP servers
   let mcp: McpClientManager | undefined;
   const serverNames = Object.keys(config.mcpServers);
@@ -482,9 +628,9 @@ async function initComponents(config: MicroExpertConfig) {
     }
   }
 
-  const agent = new AgentLoop(client, memory, config, tools, mcp);
+  const agent = new AgentLoop(client, memory, config, mcp);
 
-  return { memory, inference, client, tools, agent, mcp };
+  return { memory, inference, client, agent, mcp };
 }
 
 function openBrowser(url: string): void {

@@ -14,7 +14,65 @@ Large models are expensive, slow, and require an internet connection. Small mode
 
 MicroExpert bridges this gap with **Context-Time Training (CTT)** — the idea that intelligently curated context injected at inference time can substitute for billions of parameters. A 0.5B model with CTT outperforms much larger models without memory on personalized task completion.
 
-### How it compares to ICRL
+### Key Advantages
+
+#### Complete Privacy
+
+Your data never leaves your machine. There are no API calls to external servers, no telemetry, no cloud storage. Every conversation, memory, skill, and user profile lives in `~/.micro-expert/memory/` — a local directory you fully control. This makes MicroExpert suitable for environments where data sovereignty is non-negotiable: medical records, legal documents, proprietary codebases, financial data, personal journals, or any context where sending information to a third party is unacceptable.
+
+#### Fully Offline
+
+MicroExpert works without an internet connection after initial setup. The model runs locally via llama-server, memory is embedded, and the entire inference pipeline operates in a single Node.js process. Deploy it on an air-gapped workstation, a field laptop, a submarine, or anywhere you need AI without connectivity.
+
+#### Runs on Low-Resource Hardware
+
+Designed for the edge. A quantized 0.8B model uses ~500 MB of disk and runs comfortably on 2 GB of RAM with no GPU required. The lightweight option (Gemma 3 270M) needs just ~170 MB. This means MicroExpert works on:
+
+- Old laptops and refurbished hardware
+- Raspberry Pi and single-board computers
+- Virtual machines with minimal allocation
+- CI/CD runners and build agents
+- Embedded systems and IoT gateways
+
+llama-server is spawned on demand and auto-stops after an idle timeout (default 300s), so RAM is freed when not in use.
+
+#### No Fine-Tuning Required
+
+Traditional approaches to specializing a model require fine-tuning: collecting datasets, running GPU-intensive training, managing model versions, and risking catastrophic forgetting. MicroExpert replaces all of that with memory. Skills are just JSON entries that get recalled at inference time as few-shot examples. To teach the model something new, you save a memory. To forget something, you delete it. There is no training step, no GPU, no waiting — changes take effect on the next request.
+
+#### Knowledge as Portable Data
+
+Memory is just files. You can:
+
+- **Back up** your agent's knowledge with `cp` or `git`
+- **Export** specific topics with `micro-expert export-memories --filter "n8n" --tags "mcp"`
+- **Share** knowledge as Memory Packs — versioned JSON files publishable on GitHub
+- **Restore** from backup by copying the memory directory back
+- **Diff** what the agent knows between two points in time
+- **Version-control** memory alongside your project
+
+Unlike fine-tuning (where knowledge is baked into weights and inseparable from the model), MicroExpert's knowledge is transparent, editable, and portable.
+
+#### Model-Agnostic Memory
+
+The same memory works across different models. You can:
+
+- **Swap models per task**: use a 270M model for fast lookups, a 0.8B for general chat, and a 2B for complex tool calling — all sharing the same memory store
+- **Upgrade models** without losing knowledge: switch from Qwen2.5-0.5B to Qwen3.5-0.8B and everything the agent learned transfers instantly
+- **Downgrade for resource constraints**: move to a smaller model on weaker hardware and the memory compensates for the lost parameters
+- **Test different architectures**: try Qwen vs Gemma vs any GGUF-compatible model, same memory, different inference
+
+This is fundamentally different from fine-tuning, where knowledge is locked inside a specific model's weights and cannot be transferred.
+
+#### Self-Improving Through Use
+
+Every conversation is persisted as a session. The mining pipeline (auto or manual) extracts patterns, skills, and knowledge from those sessions. Corrections boost the right memories and suppress wrong ones. The agent gets better at your specific tasks the more you use it — without any explicit training step. This is the CTT cycle:
+
+```
+interact → save session → mine patterns → recall as context → better responses → repeat
+```
+
+### How It Compares to ICRL
 
 [In-Context Reinforcement Learning](https://www.icrl.dev/) (Sarukkai et al., NeurIPS 2025) validates the same core premise: in-context examples function as an implicit fine-tune. MicroExpert goes further:
 
@@ -31,6 +89,104 @@ Both approaches prove that context-as-training works. MicroExpert is designed fo
 
 ---
 
+## Use Cases
+
+### Team Knowledge Sharing
+
+Export your agent's accumulated knowledge about a project and share it with teammates. When someone joins the team, they install the memory pack and their local agent immediately knows the project conventions, common patterns, and tool usage — without reading pages of documentation or pair-programming sessions.
+
+```bash
+# Senior developer exports project knowledge
+micro-expert export-memories \
+  --filter "authentication" \
+  --pack-name "Auth Service Knowledge" \
+  --pack-author "Alice" \
+  --output auth-knowledge.json
+
+# New team member installs it
+micro-expert install auth-knowledge.json
+```
+
+### Onboarding Acceleration
+
+Create memory packs that encode onboarding knowledge: project architecture, coding conventions, common commands, API patterns, deployment procedures. New hires install the pack and have an AI assistant that already knows how things work — reducing the ramp-up time from weeks to minutes.
+
+```bash
+# Create an onboarding pack with project-specific knowledge
+micro-expert export-memories \
+  --pack-name "Acme Corp Onboarding" \
+  --pack-desc "Project conventions, architecture decisions, deployment procedures" \
+  --pack-tags "onboarding,conventions,deploy" \
+  --output onboarding-pack.json
+```
+
+### Documentation as Memory
+
+Instead of hoping the model read your documentation, inject it directly into memory. Technical docs, API references, runbooks, and architecture decision records become recallable context that the agent uses to answer questions accurately.
+
+```bash
+# Import a documentation pack
+micro-expert install https://example.com/packs/api-reference.json
+
+# The agent now answers questions using your actual docs, not hallucinations
+micro-expert ask "How do I authenticate with the payment API?"
+```
+
+### Offline Field Work
+
+Deploy MicroExpert on laptops used in environments without internet: research stations, manufacturing floors, remote offices, field inspections. The agent works fully offline with all its accumulated knowledge, and sessions can be synced later when connectivity is available.
+
+### Privacy-Sensitive Domains
+
+Use MicroExpert for domains where data cannot leave the local machine: patient records in healthcare, case files in legal, proprietary code in enterprise, classified material in government. The entire pipeline — model, memory, inference — runs locally with zero external communication.
+
+### Multi-Model Workflows
+
+Use different models for different tasks, all backed by the same memory:
+
+```bash
+# Fast lookups with a tiny model
+MICRO_EXPERT_MODEL_PATH=~/.micro-expert/models/gemma-270m.gguf \
+  micro-expert ask "What's the deploy command?"
+
+# Complex tool calling with a larger model
+MICRO_EXPERT_MODEL_PATH=~/.micro-expert/models/qwen3.5-2b.gguf \
+  micro-expert ask "Create an n8n workflow that sends a Slack notification on new GitHub issues"
+```
+
+The memory store is shared — skills learned with the 2B model are available when running the 270M model, and vice versa.
+
+### Knowledge Backup and Recovery
+
+Memory is portable data. Back it up, version it, restore it:
+
+```bash
+# Backup
+cp -r ~/.micro-expert/memory/ ~/backups/micro-expert-memory-$(date +%F)/
+
+# Or export as a structured pack
+micro-expert export-memories --output full-backup.json
+
+# Restore on a new machine
+micro-expert install full-backup.json
+```
+
+Unlike fine-tuning (where you'd need to retrain the model from scratch), restoring from a memory backup takes seconds.
+
+### Skill Distribution
+
+Create and publish skill packs for specific tool ecosystems. The community can build a catalog of packs that solve cold-start for common integrations:
+
+```bash
+# Generate skills from MCP tool metadata
+micro-expert seed --output n8n-skills.json --pack-name "n8n MCP Skills"
+
+# Publish to GitHub, share via URL
+micro-expert install https://raw.githubusercontent.com/.../packs/n8n-skills.json
+```
+
+---
+
 ## Architecture
 
 ```
@@ -39,7 +195,7 @@ Both approaches prove that context-as-training works. MicroExpert is designed fo
 │                                                           │
 │  ┌─────────────┐  ┌────────────────────────────────────┐  │
 │  │   Web UI     │  │              CLI                   │  │
-│  │  (vanilla)   │  │  setup·serve·chat·ask·mcp-status   │  │
+│  │  (vanilla)   │  │  serve·chat·ask·telegram·mine·seed  │  │
 │  └──────┬───────┘  └──────────────┬─────────────────────┘  │
 │         │                         │                        │
 │         ▼                         ▼                        │
@@ -136,6 +292,8 @@ micro-expert mcp-status
 | `micro-expert import-memories <file>` | Import memories from a JSON file |
 | `micro-expert install <source>` | Install a memory pack from a URL or local file |
 | `micro-expert mine` | Mine stored sessions to extract skills and memories using the local model |
+| `micro-expert seed` | Generate skill memories from MCP tool metadata (artificial experience) |
+| `micro-expert telegram` | Start the Telegram bot for chat-based interaction |
 
 ### CLI Flags
 
@@ -145,6 +303,7 @@ micro-expert mcp-status
 | `--model <path>` | Path to GGUF model file | `~/.micro-expert/models/model.gguf` |
 | `--light` | Use lightweight model (Gemma 3 270M) during setup | `false` |
 | `--no-open` | Don't open browser on `serve` | `false` |
+| `--token <token>` | Telegram bot token (for `telegram` command) | config value |
 
 ---
 
@@ -194,7 +353,7 @@ Small models sometimes wrap tool tags in markdown code fences (` ```mcp ... ``` 
 
 ### Vision — Image Input
 
-The Web UI supports attaching images via the 📎 button. Images are sent as base64 data URLs in the `image` field of the chat completion request. The model receives them as `image_url` content parts (requires a vision-capable GGUF model).
+The Web UI supports attaching images via the button. Images are sent as base64 data URLs in the `image` field of the chat completion request. The model receives them as `image_url` content parts (requires a vision-capable GGUF model).
 
 > **Note**: Vision requires an `mmproj` (multimodal projector) GGUF file. Qwen3.5 models are vision-capable — download the `mmproj-F16.gguf` from the same HuggingFace repo and place it in `~/.micro-expert/models/`. MicroExpert auto-detects mmproj files in the same directory as the model. Text-only models (Qwen2.5, Gemma 3) will ignore image inputs.
 
@@ -256,6 +415,53 @@ Add MCP servers to `~/.micro-expert/config.json`:
 ### Tool limit
 
 Default `mcpMaxTools: 10` — limits the number of tool descriptions injected into the prompt. Sub-1B models have small context windows; too many tools degrade response quality.
+
+---
+
+## Telegram Bot
+
+MicroExpert can run as a Telegram bot, allowing you to interact with your local agent from any Telegram client — mobile, desktop, or web.
+
+### Setup
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and get the bot token
+2. Add the token to `~/.micro-expert/config.json`:
+
+```json
+{
+  "telegram": {
+    "botToken": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+    "allowedUsers": [123456789]
+  }
+}
+```
+
+3. Start the bot:
+
+```bash
+micro-expert telegram
+
+# Or pass the token directly
+micro-expert telegram --token "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+```
+
+### Features
+
+- **Long polling** — no webhooks, no public URL needed, works behind NAT/firewall
+- **Photo support** — send images and the bot processes them with vision-capable models
+- **Per-user history** — each Telegram user gets their own conversation context (last 10 turns)
+- **User allowlist** — restrict access to specific Telegram user IDs (empty = allow all)
+- **Message splitting** — long responses are automatically split at newline boundaries (Telegram's 4096 char limit)
+- **Zero dependencies** — uses `node:https` directly, no Telegram SDK
+
+### Configuration
+
+| Field | Description | Default |
+|---|---|---|
+| `telegram.botToken` | Bot token from @BotFather | (required) |
+| `telegram.allowedUsers` | Array of allowed Telegram user IDs | `[]` (allow all) |
+
+To find your Telegram user ID, send a message to [@userinfobot](https://t.me/userinfobot).
 
 ---
 
@@ -336,6 +542,19 @@ MicroExpert uses RepoMemory's CTT pipeline:
 
 Over time, the agent builds a compressed, curated representation of your context that fits in a sub-1B model's context window. The memory is the model's experience.
 
+### Memory vs Fine-Tuning
+
+| | Memory (CTT) | Fine-Tuning |
+|---|---|---|
+| **Hardware** | CPU-only, no GPU needed | Requires GPU (often expensive cloud instances) |
+| **Speed** | Instant — save a memory, done | Hours to days of training |
+| **Portability** | JSON files — copy, share, version-control | Baked into model weights — model-specific |
+| **Reversibility** | Delete a memory to forget | Retrain the entire model |
+| **Transparency** | Read exactly what the model knows | Opaque weights, no inspection |
+| **Multi-model** | Same memory works across any GGUF model | One model, one fine-tune |
+| **Risk** | Zero risk of catastrophic forgetting | Can degrade base capabilities |
+| **Cost** | Free (local CPU) | $$$ (GPU compute, dataset curation) |
+
 ### Teaching the Model New Skills
 
 You can teach MicroExpert to use new tools by saving skill memories. When the model sees these skills recalled as few-shot examples, it imitates the pattern:
@@ -408,6 +627,12 @@ micro-expert export-memories \
 
 # Export without metadata (auto-detects v2 if skills exist, otherwise v1)
 micro-expert export-memories --output my-memories.json
+
+# Export only memories about a specific topic
+micro-expert export-memories --filter "authentication" --output auth-knowledge.json
+
+# Export only memories with specific tags
+micro-expert export-memories --tags "n8n,mcp" --output n8n-only.json
 ```
 
 #### Installing a Pack
@@ -454,6 +679,38 @@ Users install packs with a single command:
 micro-expert install https://raw.githubusercontent.com/.../packs/n8n-mcp-skills.json
 ```
 
+### Artificial Experience — Seeding from Tool Metadata
+
+The `seed` command auto-generates skill memories from MCP tool schemas, creating "artificial experience" that bootstraps a small model's ability to use tools without any prior interaction. This is how a larger model's knowledge (embedded in tool descriptions and schemas) can be transferred to optimize a smaller model.
+
+```bash
+# Preview what seeds would be generated (no changes)
+micro-expert seed --dry-run
+
+# Save seeds directly to memory
+micro-expert seed
+
+# Export as a distributable pack file
+micro-expert seed --output n8n-seeds.json --pack-name "n8n MCP Skills"
+
+# Then install the pack on another instance
+micro-expert install n8n-seeds.json
+```
+
+For each MCP tool, `seed` generates:
+1. A **skill memory** with a concrete `[MCP: tool_name {example_args}]` example
+2. A **format reference** (for tools with required parameters) documenting parameter types and providing an example
+
+Example generated seed for `n8n_create_workflow`:
+```
+Para create workflow: [MCP: n8n_create_workflow {"name":"Example","nodes":[{}],"connections":{}}]
+```
+
+The generated seeds are recalled as few-shot examples, teaching the model the exact tag format for each tool. Combined with Memory Packs, this enables a workflow where:
+1. A developer with access to a larger model generates and curates seed packs
+2. End users install those packs on resource-constrained devices
+3. Sub-1B models can immediately call MCP tools correctly on their first interaction
+
 ---
 
 ## Configuration
@@ -478,7 +735,11 @@ Config priority: **CLI args > env vars > config file > defaults**
   "threads": 0,
   "mcpServers": {},
   "mcpMaxTools": 10,
-  "mmprojPath": ""
+  "mmprojPath": "",
+  "telegram": {
+    "botToken": "",
+    "allowedUsers": []
+  }
 }
 ```
 
@@ -501,6 +762,8 @@ All use the `MICRO_EXPERT_` prefix:
 | `MICRO_EXPERT_CONTEXT_BUDGET` | Max chars for CTT context injection | `4096` |
 | `MICRO_EXPERT_RECALL_TEMPLATE` | Recall template: `default`, `technical`, `support`, `rag_focused` | `default` |
 | `MICRO_EXPERT_MMPROJ_PATH` | Path to mmproj GGUF for vision (empty = auto-detect, `none` = disabled) | `""` (auto) |
+| `MICRO_EXPERT_TELEGRAM_TOKEN` | Telegram bot token (same as `telegram.botToken` in config) | (none) |
+| `MICRO_EXPERT_TELEGRAM_USERS` | Comma-separated allowed user IDs (e.g., `123,456`) | (none) |
 
 ---
 
@@ -515,7 +778,7 @@ micro-expert/
 │   ├── config.ts                    # Config loading (defaults + env + file + CLI)
 │   ├── agent/
 │   │   ├── loop.ts                  # Core pipeline: recall → prompt → infer → tools → save
-│   │   ├── tools.ts                 # Tool registry (recall, search, save_memory)
+│   │   ├── tools.ts                 # Tool registry + safe math evaluator
 │   │   └── http-tool.ts            # FETCH tag: HTTP requests with security controls
 │   ├── inference/
 │   │   ├── manager.ts               # llama-server lifecycle (spawn, health, idle)
@@ -525,12 +788,16 @@ micro-expert/
 │   │   ├── client.ts               # McpClientManager: stdio + HTTP dual transport
 │   │   └── http-transport.ts       # Custom HttpMcpClient (bypasses SDK hang on Windows)
 │   ├── memory/
-│   │   └── provider.ts             # RepoMemory embedded wrapper
+│   │   ├── provider.ts             # RepoMemory embedded wrapper
+│   │   ├── ai-provider.ts          # LlamaAiProvider adapter for auto-mining
+│   │   └── seed.ts                 # Skill seed generator from MCP tool metadata
 │   ├── server/
 │   │   ├── http.ts                  # node:http server (API + UI serving)
 │   │   └── routes.ts               # API route handlers
 │   ├── setup/
 │   │   └── wizard.ts               # Setup wizard (download model + llama-server)
+│   ├── telegram/
+│   │   └── bot.ts                  # Telegram bot (long polling, no external deps)
 │   └── ui/
 │       └── index.html               # Web UI SPA (vanilla HTML/CSS/JS, ~15KB)
 ├── tests/
@@ -540,7 +807,10 @@ micro-expert/
 │   ├── calculator.test.ts           # Safe math evaluator (24 tests)
 │   ├── http-tool.test.ts            # FETCH tag parsing + security (32 tests)
 │   ├── memory-export.test.ts        # Export/import round-trip, v2 packs (11 tests)
-│   └── mcp-client.test.ts          # MCP client: stdio + HTTP (20 tests)
+│   ├── mcp-client.test.ts          # MCP client: stdio + HTTP (20 tests)
+│   ├── seed.test.ts                # Seed generator (7 tests)
+│   ├── telegram-bot.test.ts        # Telegram bot (20 tests)
+│   └── routes.test.ts              # API routes (19 tests)
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts
@@ -557,7 +827,7 @@ git clone https://github.com/MauricioPerera/micro-expert.git
 cd micro-expert
 npm install
 npm run build       # Compile TypeScript + copy UI assets
-npm test            # Run all 122 tests (7 suites)
+npm test            # Run all 168 tests (10 suites)
 npm run dev         # TypeScript watch mode
 npm start           # Start server (micro-expert serve)
 ```
@@ -596,7 +866,7 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | **Inference** | `llama-server` from llama.cpp (spawned on-demand) |
 | **MCP** | `@modelcontextprotocol/sdk` (stdio) + custom `HttpMcpClient` (HTTP/SSE) |
 | **CLI** | `commander` |
-| **Tests** | `vitest` (122 tests across 7 suites) |
+| **Tests** | `vitest` (168 tests across 10 suites) |
 | **Frontend** | Vanilla HTML/CSS/JS (zero dependencies, ~15KB) |
 
 ---
@@ -609,6 +879,8 @@ Tests use vitest with mocks for inference and real RepoMemory instances for memo
 | **Qwen3.5-0.8B** (Q4_K_M) | ~508 MB | Upgrade — better reasoning, vision, supports thinking mode |
 | **Qwen3.5-2B** (Q4_K_M) | ~1.2 GB | Best quality — more consistent tool calling, vision capable |
 | **Gemma 3 270M** (Q4_K_M) | ~170 MB | `--light` — minimal footprint, faster inference |
+
+All models share the same memory store. You can switch between them freely — skills learned with one model are available to all others.
 
 ### Thinking Mode (Qwen3.5)
 
@@ -631,9 +903,10 @@ MicroExpert includes several safety measures for local operation:
 - **Request body limit** — 10 MB max on all API requests (supports base64 image payloads)
 - **SSE timeout** — 5-minute inactivity timeout on streaming connections
 - **FETCH tool restrictions** — Blocked hosts (localhost, loopback, private IPs), blocked schemes (file://, ftp://, data:), 10s timeout, 32 KB response limit, 2048 char result truncation
-- **Config validation** — Port (1-65535), temperature (0-2), threads (≥0), maxTokens (≥1), contextSize (≥128) validated on load with fallback to defaults
+- **Config validation** — Port (1-65535), temperature (0-2), threads (>=0), maxTokens (>=1), contextSize (>=128) validated on load with fallback to defaults
 - **Safe math evaluator** — Recursive descent parser for `[CALC:]` tags — no `eval()`, no code execution
 - **Memory import validation** — Payload structure validated before processing
+- **Message validation** — Each message in API requests must have a valid `role` string and non-null `content`
 - **Inference retry** — Detects transient errors (ECONNREFUSED, socket hang up, etc.) with automatic retry on llama-server restart races
 
 ---
@@ -643,6 +916,7 @@ MicroExpert includes several safety measures for local operation:
 - [ ] `micro-expert index <path>` — ingest a codebase into memory
 - [ ] MCP server mode — expose as a tool for Claude Code, Cursor, etc.
 - [x] Auto-mining — automatically extract memories and skills from sessions using the local model
+- [x] Telegram bot — interact with MicroExpert via Telegram chat
 - [ ] Multi-model support — swap models per task type
 - [ ] Metrics dashboard — visualize memory growth, recall accuracy, correction rate
 

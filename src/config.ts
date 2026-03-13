@@ -51,6 +51,13 @@ export interface MicroExpertConfig {
   mcpMaxTools: number;
   /** Path to mmproj GGUF file for vision support (empty = auto-detect, 'none' = disabled) */
   mmprojPath: string;
+  /** Telegram bot configuration */
+  telegram?: {
+    /** Bot token from @BotFather */
+    botToken: string;
+    /** Allowed Telegram user IDs (empty = allow all) */
+    allowedUsers?: number[];
+  };
 }
 
 const DEFAULTS: MicroExpertConfig = {
@@ -127,6 +134,18 @@ function loadEnvVars(): Partial<MicroExpertConfig> {
     } else {
       (result as Record<string, unknown>)[k] = val;
     }
+  }
+
+  // Handle nested telegram config from env vars
+  const telegramToken = process.env.MICRO_EXPERT_TELEGRAM_TOKEN;
+  const telegramUsers = process.env.MICRO_EXPERT_TELEGRAM_USERS;
+  if (telegramToken) {
+    (result as Record<string, unknown>).telegram = {
+      botToken: telegramToken,
+      allowedUsers: telegramUsers
+        ? telegramUsers.split(',').map(id => parseInt(id.trim(), 10)).filter(n => !isNaN(n))
+        : undefined,
+    };
   }
 
   return result;

@@ -359,7 +359,7 @@ describe('AgentLoop', () => {
 
     const inference = mockInferenceClient('Contents: [MCP: read_file {"path": "/tmp/test.txt"}]');
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     const result = await agent.run({
       message: 'Read the file',
@@ -382,7 +382,7 @@ describe('AgentLoop', () => {
 
     const inference = mockInferenceClient('Sure!');
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     await agent.run({ message: 'Hello', userId: 'test-user' });
 
@@ -405,7 +405,7 @@ describe('AgentLoop', () => {
 
     const inference = mockInferenceClient('Result: [MCP: tool1 {invalid json}]');
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     const result = await agent.run({ message: 'Test', userId: 'test-user' });
 
@@ -425,7 +425,7 @@ describe('AgentLoop', () => {
 
     const inference = mockInferenceClient('Result: [MCP: failing {}]');
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     const result = await agent.run({ message: 'Test', userId: 'test-user' });
 
@@ -444,7 +444,7 @@ describe('AgentLoop', () => {
     const complexJson = '{"name": "Test", "nodes": [{"id": "t1", "type": "n8n-nodes-base.httpRequest", "position": [250, 300], "parameters": {}}], "connections": {}}';
     const inference = mockInferenceClient(`Creating: [MCP: n8n_create_workflow ${complexJson}]`);
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     const result = await agent.run({ message: 'Create workflow', userId: 'test-user' });
 
@@ -462,7 +462,7 @@ describe('AgentLoop', () => {
     // Model wraps MCP tag in ```mcp code fence
     const inference = mockInferenceClient('Here is the result:\n\n```mcp\n[MCP: n8n_list_workflows {}]\n```\n\nDone.');
     const memory = mockMemoryProvider();
-    const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+    const agent = new AgentLoop(inference, memory, config, mockMcp);
 
     const result = await agent.run({ message: 'List workflows', userId: 'test-user' });
 
@@ -519,7 +519,7 @@ describe('AgentLoop', () => {
     try {
       const inference = mockInferenceClient('Math: [CALC: 3 * 3], API: [FETCH: GET https://api.example.com/x], MCP: [MCP: greet {"name": "World"}]');
       const memory = mockMemoryProvider();
-      const agent = new AgentLoop(inference, memory, config, undefined, mockMcp);
+      const agent = new AgentLoop(inference, memory, config, mockMcp);
 
       const result = await agent.run({ message: 'All three', userId: 'test-user' });
 

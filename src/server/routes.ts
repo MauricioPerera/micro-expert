@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readdirSync, existsSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
 import type { AgentLoop } from '../agent/loop.js';
 import type { MemoryProvider } from '../memory/provider.js';
 import type { InferenceManager } from '../inference/manager.js';
@@ -47,6 +49,21 @@ export async function handleRoute(
   if (path.startsWith('/history/') && method === 'GET') {
     const sessionId = path.slice('/history/'.length);
     return handleHistoryGet(res, ctx, sessionId);
+  }
+
+  // Config (for UI settings panel)
+  if (path === '/v1/config' && method === 'GET') {
+    return handleConfigGet(res, ctx);
+  }
+
+  // Available models
+  if (path === '/v1/models/available' && method === 'GET') {
+    return handleAvailableModels(res, ctx);
+  }
+
+  // Switch model
+  if (path === '/v1/models/switch' && method === 'POST') {
+    return handleModelSwitch(req, res, ctx);
   }
 
   // Memory export
@@ -98,11 +115,26 @@ async function handleChatCompletion(
     return true;
   }
 
-  const messages = parsed.messages as Array<{ role: string; content: string }> | undefined;
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+  const rawMessages = parsed.messages as Array<{ role?: unknown; content?: unknown }> | undefined;
+  if (!rawMessages || !Array.isArray(rawMessages) || rawMessages.length === 0) {
     sendError(res, 400, 'messages array is required and must not be empty');
     return true;
   }
+
+  // Validate each message has role and content
+  for (const msg of rawMessages) {
+    if (!msg.role || typeof msg.role !== 'string') {
+      sendError(res, 400, 'Each message must have a "role" string');
+      return true;
+    }
+    if (msg.content === undefined || msg.content === null) {
+      sendError(res, 400, 'Each message must have "content"');
+      return true;
+    }
+  }
+
+  // After validation, we know shape is correct
+  const messages = rawMessages as Array<{ role: string; content: string }>;
 
   // Extract the last user message
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
@@ -122,6 +154,10 @@ async function handleChatCompletion(
     userId,
     history,
     image: parsed.image as string | undefined,
+    temperature: typeof parsed.temperature === 'number' ? parsed.temperature : undefined,
+    maxTokens: typeof parsed.max_tokens === 'number' ? parsed.max_tokens : undefined,
+    topP: typeof parsed.top_p === 'number' ? parsed.top_p : undefined,
+    systemPrompt: typeof parsed.system_prompt === 'string' ? parsed.system_prompt : undefined,
   };
 
   if (stream) {
@@ -291,6 +327,78 @@ async function handleMemoryImport(
     sendError(res, 400, (e as Error).message);
   }
 
+  return true;
+}
+
+async function handleConfigGet(res: ServerResponse, ctx: RouteContext): Promise<boolean> {
+  sendJson(res, {
+    temperature: ctx.config.temperature,
+    maxTokens: ctx.config.maxTokens,
+    topP: ctx.config.topP,
+    contextSize: ctx.config.contextSize,
+    recallLimit: ctx.config.recallLimit,
+    thinkingMode: ctx.config.thinkingMode,
+    modelPath: ctx.config.modelPath,
+    modelName: basename(ctx.config.modelPath),
+  });
+  return true;
+}
+
+async function handleAvailableModels(res: ServerResponse, ctx: RouteContext): Promise<boolean> {
+  const modelsDir = dirname(ctx.config.modelPath);
+  const models: Array<{ name: string; path: string; active: boolean; sizeBytes: number }> = [];
+
+  try {
+    if (existsSync(modelsDir)) {
+      const { statSync } = await import('node:fs');
+      for (const file of readdirSync(modelsDir)) {
+        if (!file.endsWith('.gguf') || file.includes('mmproj')) continue;
+        const fullPath = join(modelsDir, file);
+        const stat = statSync(fullPath);
+        models.push({
+          name: file,
+          path: fullPath,
+          active: fullPath === ctx.config.modelPath,
+          sizeBytes: stat.size,
+        });
+      }
+    }
+  } catch { /* ignore */ }
+
+  sendJson(res, { models, modelsDir });
+  return true;
+}
+
+async function handleModelSwitch(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RouteContext,
+): Promise<boolean> {
+  const body = await readBody(req);
+  if (!body) { sendError(res, 400, 'Empty request body'); return true; }
+
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(body); } catch { sendError(res, 400, 'Invalid JSON'); return true; }
+
+  const modelPath = parsed.modelPath as string | undefined;
+  if (!modelPath || typeof modelPath !== 'string') {
+    sendError(res, 400, '"modelPath" is required');
+    return true;
+  }
+
+  if (!existsSync(modelPath)) {
+    sendError(res, 400, `Model not found: ${modelPath}`);
+    return true;
+  }
+
+  // Update config in memory (not persisted to disk — restart resets)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (ctx.config as any).modelPath = modelPath;
+
+  // Restart inference with new model
+  ctx.inference.stop();
+
+  sendJson(res, { ok: true, modelPath, modelName: basename(modelPath) });
   return true;
 }
 

@@ -3,7 +3,8 @@ import { RepoMemory } from '@rckflr/repomemory';
 import type { MicroExpertConfig } from '../config.js';
 import { MEMORY_DIR } from '../config.js';
 
-export interface ChatMessage {
+/** Simple text-only message (for memory storage — no vision/multimodal). */
+export interface TextMessage {
   role: string;
   content: string;
 }
@@ -153,7 +154,7 @@ export class MemoryProvider {
   /**
    * Save a conversation turn as a session.
    */
-  saveSession(userId: string, messages: ChatMessage[]): string | null {
+  saveSession(userId: string, messages: TextMessage[]): string | null {
     try {
       const [session] = this.repo.sessions.save(this.agentId, userId, {
         content: messages.map(m => `${m.role}: ${m.content}`).join('\n'),
@@ -221,14 +222,14 @@ export class MemoryProvider {
   /**
    * Get a specific session by ID.
    */
-  getSession(sessionId: string): { id: string; content: string; messages?: ChatMessage[]; createdAt: string } | null {
+  getSession(sessionId: string): { id: string; content: string; messages?: TextMessage[]; createdAt: string } | null {
     try {
       const session = this.repo.sessions.get(sessionId);
       if (!session) return null;
       return {
         id: session.id,
         content: session.content,
-        messages: session.messages as ChatMessage[] | undefined,
+        messages: session.messages as TextMessage[] | undefined,
         createdAt: session.createdAt,
       };
     } catch {
@@ -283,41 +284,30 @@ export class MemoryProvider {
   }
 
   /**
-   * Export all memories for a user as a portable JSON structure.
+   * Export memories for a user as a portable JSON structure.
    * @param userId - User ID to export for
    * @param packMeta - Optional pack metadata for v2 format (catalog publishing)
+   * @param filter - Optional filter: search query (TF-IDF relevance) and/or tags to match
    */
-  exportMemories(userId: string, packMeta?: MemoryPackMeta): MemoryExportFile {
+  exportMemories(
+    userId: string,
+    packMeta?: MemoryPackMeta,
+    filter?: { query?: string; tags?: string[]; minScore?: number },
+  ): MemoryExportFile {
     const memories: MemoryExportEntry[] = [];
     const skills: MemoryExportEntry[] = [];
-    const pageSize = 100;
-    let offset = 0;
 
-    // Paginate through all memories
-    while (true) {
-      const page = this.repo.memories.listPaginated(this.agentId, userId, {
-        limit: pageSize,
-        offset,
-      });
+    // Collect matching memories — either filtered by query/tags or all
+    const allEntries = filter?.query
+      ? this.searchAndCollect(userId, filter.query, filter.tags, filter.minScore ?? 0.1)
+      : this.listAndCollect(userId, filter?.tags);
 
-      for (const mem of page.items) {
-        const entry: MemoryExportEntry = {
-          content: mem.content,
-          category: mem.category,
-          // Strip the auto-added 'micro-expert' tag for cleaner export
-          tags: mem.tags.filter(t => t !== 'micro-expert'),
-        };
-
-        // Separate skill entries (contain tool patterns) from general memories
-        if (isSkillEntry(entry)) {
-          skills.push(entry);
-        } else {
-          memories.push(entry);
-        }
+    for (const entry of allEntries) {
+      if (isSkillEntry(entry)) {
+        skills.push(entry);
+      } else {
+        memories.push(entry);
       }
-
-      if (!page.hasMore) break;
-      offset += pageSize;
     }
 
     // Use v2 format when pack metadata is provided or skills are found
@@ -411,6 +401,77 @@ export class MemoryProvider {
    */
   dispose(): void {
     this.repo.dispose();
+  }
+
+  /**
+   * Search memories by query and collect as export entries.
+   * Uses TF-IDF relevance scoring to find topic-specific memories.
+   */
+  private searchAndCollect(
+    userId: string,
+    query: string,
+    filterTags?: string[],
+    minScore = 0.1,
+  ): MemoryExportEntry[] {
+    const results = this.repo.memories.find(this.agentId, userId, query, 500);
+    const entries: MemoryExportEntry[] = [];
+
+    for (const r of results) {
+      if (r.score < minScore) continue;
+
+      const tags = r.entity.tags.filter(t => t !== 'micro-expert');
+
+      // If tag filter is specified, entry must have at least one matching tag
+      if (filterTags && filterTags.length > 0) {
+        const hasMatch = filterTags.some(ft => tags.includes(ft));
+        if (!hasMatch) continue;
+      }
+
+      entries.push({
+        content: r.entity.content,
+        category: r.entity.category,
+        tags,
+      });
+    }
+
+    return entries;
+  }
+
+  /**
+   * List all memories and optionally filter by tags.
+   */
+  private listAndCollect(userId: string, filterTags?: string[]): MemoryExportEntry[] {
+    const entries: MemoryExportEntry[] = [];
+    const pageSize = 100;
+    let offset = 0;
+
+    while (true) {
+      const page = this.repo.memories.listPaginated(this.agentId, userId, {
+        limit: pageSize,
+        offset,
+      });
+
+      for (const mem of page.items) {
+        const tags = mem.tags.filter(t => t !== 'micro-expert');
+
+        // If tag filter is specified, entry must have at least one matching tag
+        if (filterTags && filterTags.length > 0) {
+          const hasMatch = filterTags.some(ft => tags.includes(ft));
+          if (!hasMatch) continue;
+        }
+
+        entries.push({
+          content: mem.content,
+          category: mem.category,
+          tags,
+        });
+      }
+
+      if (!page.hasMore) break;
+      offset += pageSize;
+    }
+
+    return entries;
   }
 }
 
