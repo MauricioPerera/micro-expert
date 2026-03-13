@@ -491,7 +491,7 @@ To enable: set `"thinkingMode": true` in config or `MICRO_EXPERT_THINKING=true`.
 
 MicroExpert includes several safety measures for local operation:
 
-- **Request body limit** — 1 MB max on all API requests (DoS prevention)
+- **Request body limit** — 10 MB max on all API requests (supports base64 image payloads)
 - **SSE timeout** — 5-minute inactivity timeout on streaming connections
 - **FETCH tool restrictions** — Blocked hosts (localhost, loopback, private IPs), blocked schemes (file://, ftp://, data:), 10s timeout, 32 KB response limit, 2048 char result truncation
 - **Config validation** — Port (1-65535), temperature (0-2), threads (≥0), maxTokens (≥1), contextSize (≥128) validated on load with fallback to defaults

@@ -60,7 +60,8 @@ Key design decisions:
 - Vision support: `image` field in AgentRequest sends base64 data URL as `image_url` content part
 - Vision requires mmproj GGUF file; `mmprojPath` config auto-detects `mmproj*.gguf` in same dir as model
 - `detectMmproj()` in `config.ts` prefers F16 > BF16 > F32; InferenceManager passes `--mmproj` to llama-server
-- Security: 1MB body limit in `readBody()`, 5min SSE timeout, config validation, promise mutex in InferenceManager
+- Security: 10MB body limit in `readBody()` (supports base64 images), 5min SSE timeout, config validation, promise mutex in InferenceManager
+- Streaming: `reasoning_content` from llama-server wrapped in `<think>` tags so client-side stripping handles it
 - Transient error retry: `isTransientError()` in `client.ts` catches ECONNREFUSED/ECONNRESET/socket hang up
 
 ## Conventions
