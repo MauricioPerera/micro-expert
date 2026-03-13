@@ -16,6 +16,11 @@
     "start": "node dist/bin/micro-expert.js serve",
     "lint": "tsc --noEmit"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20.0.0"
   },
