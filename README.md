@@ -237,6 +237,17 @@ Everything runs in a **single Node.js process**. RepoMemory is embedded — no s
 
 ### Install & Setup
 
+#### Option A: npm (recommended)
+
+```bash
+npm install -g micro-expert
+
+# Download model + llama-server (interactive wizard)
+micro-expert setup
+```
+
+#### Option B: From source
+
 ```bash
 git clone https://github.com/MauricioPerera/micro-expert.git
 cd micro-expert
