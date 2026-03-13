@@ -184,7 +184,7 @@ All three tag types can appear in the same response and are processed sequential
 
 The Web UI supports attaching images via the 📎 button. Images are sent as base64 data URLs in the `image` field of the chat completion request. The model receives them as `image_url` content parts (requires a vision-capable GGUF model).
 
-> **Note**: Not all sub-1B models support vision. Qwen2.5 and Qwen3.5 text-only models will ignore image inputs.
+> **Note**: Vision requires an `mmproj` (multimodal projector) GGUF file. Qwen3.5 models are vision-capable — download the `mmproj-F16.gguf` from the same HuggingFace repo and place it in `~/.micro-expert/models/`. MicroExpert auto-detects mmproj files in the same directory as the model. Text-only models (Qwen2.5, Gemma 3) will ignore image inputs.
 
 ---
 
@@ -341,7 +341,8 @@ Config priority: **CLI args > env vars > config file > defaults**
   "recallTemplate": "default",
   "threads": 0,
   "mcpServers": {},
-  "mcpMaxTools": 10
+  "mcpMaxTools": 10,
+  "mmprojPath": ""
 }
 ```
 
@@ -363,6 +364,7 @@ All use the `MICRO_EXPERT_` prefix:
 | `MICRO_EXPERT_RECALL_LIMIT` | Max items to recall from memory | `5` |
 | `MICRO_EXPERT_CONTEXT_BUDGET` | Max chars for CTT context injection | `4096` |
 | `MICRO_EXPERT_RECALL_TEMPLATE` | Recall template: `default`, `technical`, `support`, `rag_focused` | `default` |
+| `MICRO_EXPERT_MMPROJ_PATH` | Path to mmproj GGUF for vision (empty = auto-detect, `none` = disabled) | `""` (auto) |
 
 ---
 

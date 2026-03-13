@@ -58,6 +58,8 @@ Key design decisions:
 - `stripThinkingTokens()` in `loop.ts` removes thinking blocks from non-streaming responses
 - `stripThinking()` in `index.html` removes thinking blocks client-side during streaming
 - Vision support: `image` field in AgentRequest sends base64 data URL as `image_url` content part
+- Vision requires mmproj GGUF file; `mmprojPath` config auto-detects `mmproj*.gguf` in same dir as model
+- `detectMmproj()` in `config.ts` prefers F16 > BF16 > F32; InferenceManager passes `--mmproj` to llama-server
 - Security: 1MB body limit in `readBody()`, 5min SSE timeout, config validation, promise mutex in InferenceManager
 - Transient error retry: `isTransientError()` in `client.ts` catches ECONNREFUSED/ECONNRESET/socket hang up
 
@@ -93,6 +95,7 @@ Key design decisions:
 - Thinking mode: off
 - MCP servers: none (configure in config.json)
 - MCP max tools: 10 (limit for sub-1B prompt size)
+- mmproj path: auto-detect (empty string = scan model dir for mmproj*.gguf)
 
 ## MCP Config Example
 

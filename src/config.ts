@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import type { McpServerConfig } from './mcp/index.js';
 
 /** Base directory for all MicroExpert user data */
@@ -49,6 +49,8 @@ export interface MicroExpertConfig {
   mcpServers: Record<string, McpServerConfig>;
   /** Maximum number of MCP tools to expose to the model (sub-1B models need short prompts) */
   mcpMaxTools: number;
+  /** Path to mmproj GGUF file for vision support (empty = auto-detect, 'none' = disabled) */
+  mmprojPath: string;
 }
 
 const DEFAULTS: MicroExpertConfig = {
@@ -71,6 +73,7 @@ const DEFAULTS: MicroExpertConfig = {
   recallTemplate: 'default',
   mcpServers: {},
   mcpMaxTools: 10,
+  mmprojPath: '',
 };
 
 /** Environment variable mapping (MICRO_EXPERT_ prefix) */
@@ -90,6 +93,7 @@ const ENV_MAP: Partial<Record<keyof MicroExpertConfig, string>> = {
   contextSize: 'MICRO_EXPERT_CONTEXT_SIZE',
   threads: 'MICRO_EXPERT_THREADS',
   recallTemplate: 'MICRO_EXPERT_RECALL_TEMPLATE',
+  mmprojPath: 'MICRO_EXPERT_MMPROJ_PATH',
 };
 
 /** Load config file if it exists */
@@ -142,6 +146,11 @@ export function loadConfig(cliOverrides: Partial<MicroExpertConfig> = {}): Micro
     ...stripUndefined(cliOverrides),
   };
 
+  // Auto-detect mmproj file next to the model if not explicitly set
+  if (!config.mmprojPath) {
+    config.mmprojPath = detectMmproj(config.modelPath);
+  }
+
   // Validate ranges
   if (config.port < 1 || config.port > 65535) {
     console.warn(`[micro-expert] Invalid port ${config.port}, using default ${DEFAULTS.port}`);
@@ -178,6 +187,29 @@ function stripUndefined(obj: Partial<MicroExpertConfig>): Partial<MicroExpertCon
   return result;
 }
 
+/**
+ * Auto-detect an mmproj file in the same directory as the model.
+ * Looks for files matching mmproj*.gguf, prefers F16 over F32/BF16.
+ */
+function detectMmproj(modelPath: string): string {
+  try {
+    const dir = dirname(modelPath);
+    if (!existsSync(dir)) return '';
+    const files = readdirSync(dir).filter(f => /^mmproj.*\.gguf$/i.test(f));
+    if (files.length === 0) return '';
+    // Prefer F16, then BF16, then F32, then first match
+    const preferred = files.find(f => f.includes('F16'))
+      || files.find(f => f.includes('BF16'))
+      || files.find(f => f.includes('F32'))
+      || files[0];
+    const fullPath = join(dir, preferred);
+    console.log(`[micro-expert] Auto-detected mmproj: ${fullPath}`);
+    return fullPath;
+  } catch {
+    return '';
+  }
+}
+
 /** Get a human-readable summary of the current config */
 export function configSummary(config: MicroExpertConfig): string {
   const modelExists = existsSync(config.modelPath);
@@ -196,6 +228,7 @@ export function configSummary(config: MicroExpertConfig): string {
     `Recall limit:  ${config.recallLimit}`,
     `Recall template: ${config.recallTemplate}`,
     `Thinking mode: ${config.thinkingMode ? 'on' : 'off'}`,
+    `Vision:        ${config.mmprojPath && config.mmprojPath !== 'none' ? config.mmprojPath + (existsSync(config.mmprojPath) ? ' ✓' : ' ✗ not found') : 'off'}`,
     `MCP servers:   ${Object.keys(config.mcpServers).length > 0 ? Object.keys(config.mcpServers).join(', ') : 'none'}`,
     `Memory store:  ${MEMORY_DIR}`,
   ].join('\n');

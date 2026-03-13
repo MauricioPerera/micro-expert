@@ -74,6 +74,11 @@ export class InferenceManager {
       args.push('--threads', String(this.config.threads));
     }
 
+    // Vision: pass mmproj if configured and file exists
+    if (this.config.mmprojPath && this.config.mmprojPath !== 'none' && existsSync(this.config.mmprojPath)) {
+      args.push('--mmproj', this.config.mmprojPath);
+    }
+
     // Disable thinking mode by default for stability with small models
     if (!this.config.thinkingMode) {
       args.push('--jinja');
