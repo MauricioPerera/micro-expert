@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { RepoMemory } from '@rckflr/repomemory';
+import { RepoMemory, ingestA2EKnowledge, sanitizeSecrets } from '@rckflr/repomemory';
 import type { MicroExpertConfig } from '../config.js';
 import { MEMORY_DIR } from '../config.js';
 
@@ -87,6 +87,7 @@ export class MemoryProvider {
   private readonly recallLimit: number;
   private readonly contextBudget: number;
   private readonly recallTemplate: string;
+  private readonly a2eSecrets: Record<string, string>;
   private miningEnabled = false;
 
   constructor(config: MicroExpertConfig, ai?: AiProvider) {
@@ -94,6 +95,7 @@ export class MemoryProvider {
     this.recallLimit = config.recallLimit;
     this.contextBudget = config.contextBudget;
     this.recallTemplate = config.recallTemplate;
+    this.a2eSecrets = config.a2e?.secrets || {};
 
     // Ensure memory directory exists
     mkdirSync(MEMORY_DIR, { recursive: true });
@@ -109,10 +111,28 @@ export class MemoryProvider {
 
     this.miningEnabled = !!ai;
 
+    // Ingest A2E protocol documentation as knowledge (idempotent via saveOrUpdate)
+    if (config.a2e?.url) {
+      ingestA2EKnowledge(this.repo, this.agentId);
+    }
+
     if (ai) {
       // Listen for auto-mine events
       this.repo.events.on('session:mined', (payload) => {
         console.log(`[micro-expert] Auto-mined session ${payload.sessionId}`);
+
+        // Mine A2E workflow patterns additionally (deterministic, no AI needed)
+        try {
+          const session = this.getSession(payload.sessionId);
+          if (session?.content) {
+            const a2eCount = this.mineA2ePatterns(session.content, config.defaultUserId);
+            if (a2eCount > 0) {
+              console.log(`[micro-expert] Extracted ${a2eCount} A2E workflow pattern(s)`);
+            }
+          }
+        } catch (e) {
+          console.error(`[micro-expert] A2E mining error: ${(e as Error).message}`);
+        }
       });
       this.repo.events.on('session:automine:error', (payload) => {
         console.error(`[micro-expert] Auto-mine error for ${payload.sessionId}: ${payload.error}`);
@@ -149,6 +169,18 @@ export class MemoryProvider {
       estimatedChars: result.estimatedChars,
       fewShot,
     };
+  }
+
+  /**
+   * Search specifically for A2E workflow skills that match a query.
+   * Returns workflow patterns the agent has used successfully before.
+   */
+  recallWorkflows(query: string, userId: string, limit = 3): string[] {
+    const results = this.searchMemories(query, userId, limit * 3);
+    return results
+      .filter(r => r.category === 'a2e-workflow' || r.category === 'a2e-skill')
+      .slice(0, limit)
+      .map(r => r.content);
   }
 
   /**
@@ -397,6 +429,47 @@ export class MemoryProvider {
   }
 
   /**
+   * Extract A2E workflow patterns from a session's content.
+   * This is deterministic (no AI needed) — parses [A2E: ...] tags
+   * and their surrounding context to create structured workflow skills.
+   */
+  mineA2ePatterns(sessionContent: string, userId: string): number {
+    let saved = 0;
+    const lines = sessionContent.split('\n');
+
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx];
+      // Find lines containing [A2E: ...] tags
+      const tagMatch = line.match(/\[A2E:\s*([\s\S]*?)\]/);
+      if (!tagMatch) continue;
+
+      const tagContent = tagMatch[1].trim();
+      if (!tagContent) continue;
+
+      // Skip error results
+      if (line.includes('[error:')) continue;
+
+      // Look backwards for a user: line to get the query
+      let userQuery = '';
+      for (let i = idx - 1; i >= 0; i--) {
+        if (lines[i].startsWith('user:')) {
+          userQuery = lines[i].replace(/^user:\s*/, '').trim();
+          break;
+        }
+      }
+
+      if (userQuery) {
+        const sanitizedTag = sanitizeSecrets(tagContent, this.a2eSecrets);
+        const content = `Para ${userQuery.slice(0, 100)}: [A2E: ${sanitizedTag}]`;
+        this.saveMemory(userId, content, 'a2e-workflow', ['a2e', 'workflow', 'mined']);
+        saved++;
+      }
+    }
+
+    return saved;
+  }
+
+  /**
    * Clean up resources.
    */
   dispose(): void {
@@ -493,9 +566,11 @@ export class MemoryProvider {
  * that should be exported separately for few-shot injection.
  */
 function isSkillEntry(entry: MemoryExportEntry): boolean {
-  return /\[(MCP|CALC|FETCH):/.test(entry.content) &&
+  return /\[(MCP|CALC|FETCH|A2E):/.test(entry.content) &&
     (entry.category === 'mcp-skill' || entry.category === 'mcp-tools' ||
-     entry.category === 'skill' || entry.category === 'mcp-format');
+     entry.category === 'skill' || entry.category === 'mcp-format' ||
+     entry.category === 'a2e-skill' || entry.category === 'a2e-workflow' ||
+     entry.category === 'a2e-error');
 }
 
 function extractFewShotExamples(recalledText: string): FewShotExample[] {
@@ -507,20 +582,21 @@ function extractFewShotExamples(recalledText: string): FewShotExample[] {
 
   for (const entry of entries) {
     // Only process entries that contain tool tags
-    if (!/\[(MCP|CALC|FETCH):/.test(entry)) continue;
+    if (!/\[(MCP|CALC|FETCH|A2E):/.test(entry)) continue;
 
     // Strip "[category] [tags] " prefix from recalled memory entry
     // Format: "category] [tag1, tag2, ...] actual content"
     const content = entry.replace(/^[^\]]*\]\s*(?:\[[^\]]*\]\s*)?/, '');
 
     // Try to extract a tool call tag from the content
-    const toolMatch = content.match(/\[(MCP|CALC|FETCH):\s*[\s\S]*?\]/);
+    const toolMatch = content.match(/\[(MCP|CALC|FETCH|A2E):\s*[\s\S]*?\]/);
     if (!toolMatch) continue;
 
-    // For MCP tags, use bracket-aware extraction to get the full tag
+    // For MCP/A2E tags, use bracket-aware extraction to get the full tag
     let toolTag: string;
-    if (toolMatch[1] === 'MCP') {
-      const mcpStart = content.indexOf('[MCP:');
+    if (toolMatch[1] === 'MCP' || toolMatch[1] === 'A2E') {
+      const tagPrefix = `[${toolMatch[1]}:`;
+      const mcpStart = content.indexOf(tagPrefix);
       if (mcpStart === -1) continue;
       // Count brackets to find the correct end
       let depth = 0;

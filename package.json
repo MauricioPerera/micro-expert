@@ -12,7 +12,10 @@
     "build": "tsc && node -e \"const{cpSync}=require('fs');cpSync('src/ui',  'dist/src/ui',{recursive:true})\"",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:all": "vitest run && vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
+    "a2e-server": "tsx a2e-server.ts",
     "start": "node dist/bin/micro-expert.js serve",
     "lint": "tsc --noEmit"
   },
