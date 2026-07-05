@@ -671,6 +671,25 @@ Content-Type: application/json
 Body: <MemoryExportFile>
 ```
 
+#### Publishing packs — validate and red-team first
+
+Before publishing a pack, validate it without side effects:
+
+```bash
+# JSON pack (file or URL) or OKF bundle directory — never imports anything
+micro-expert validate my-pack.json
+micro-expert validate ./my-okf-bundle/
+```
+
+Then red-team it — four checks the validator cannot do for you:
+
+1. Every `[MCP:]` example's args match the real tool schema (run `micro-expert mcp-status` and compare).
+2. No two skills teach contradictory patterns for the same tool.
+3. No secret values in any content (tokens, API keys) — packs are published as plain text.
+4. `validate` passes on the exact file/dir you publish, not a local variant.
+
+Validation catches malformed packs; the red-team catches packs that validate but teach the wrong thing.
+
 #### Catalog Idea
 
 Packs can be published as JSON files in a GitHub repository, organized by domain:

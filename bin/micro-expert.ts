@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { loadConfig, configSummary, type MicroExpertConfig } from '../src/config.js';
 import { MemoryProvider } from '../src/memory/provider.js';
 import { InferenceManager } from '../src/inference/manager.js';
@@ -452,6 +454,31 @@ program
     }
   });
 
+// --- validate (check a pack / OKF bundle without importing) ---
+program
+  .command('validate <source>')
+  .description('Validate a memory pack (.json) or OKF bundle (directory) without importing. Supports http(s) URLs for JSON packs. Exits 0 if valid, 1 otherwise. Writes nothing to ~/.micro-expert.')
+  .action(async (source) => {
+    try {
+      const outcome = await runValidate(source);
+      if (outcome.ok) {
+        if (outcome.kind === 'pack') {
+          console.log(`✅ Valid pack: ${source} — ${outcome.counts.memories} memories, ${outcome.counts.skills} skills.`);
+        } else {
+          console.log(`✅ Valid OKF bundle: ${source} — ${outcome.counts.nodes} nodes.`);
+        }
+        process.exitCode = 0;
+      } else {
+        console.error(`❌ Validation failed — ${source}:`);
+        for (const err of outcome.errors) console.error(`   ${err}`);
+        process.exitCode = 1;
+      }
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
 // --- mine (extract skills from stored sessions) ---
 program
   .command('mine')
@@ -704,7 +731,11 @@ program
   });
 
 // --- Parse and run ---
-program.parse();
+// Only parse argv when this module is the entry point, so the command
+// handlers can be imported (and unit-tested) without triggering program.parse().
+const isMainModule =
+  !!process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMainModule) program.parse();
 
 // --- Helpers ---
 
@@ -744,4 +775,87 @@ function openBrowser(url: string): void {
   import('node:child_process').then(({ exec }) => {
     exec(`${cmd} ${url}`);
   }).catch(() => { /* Ignore if browser can't open */ });
+}
+
+// --- validate handler (exported for unit tests; no memory side effects) ---
+
+export interface ValidateCounts {
+  memories: number;
+  skills: number;
+  nodes: number;
+}
+
+export interface ValidateOutcome {
+  ok: boolean;
+  kind: 'pack' | 'okf';
+  source: string;
+  counts: ValidateCounts;
+  errors: string[];
+}
+
+/** Reserved OKF filenames — not concepts (must mirror src/pack/okf.ts). */
+const OKF_RESERVED = new Set(['index.md', 'log.md']);
+
+/**
+ * Validate a memory pack (`.json` file or http(s) URL) or an OKF bundle
+ * (a directory of `.md` files) WITHOUT importing anything into memory.
+ * Returns a structured outcome so the `validate` command and unit tests
+ * share one code path. Throws on unreadable sources (network/FS errors,
+ * invalid top-level JSON) — the caller is responsible for reporting.
+ */
+export async function runValidate(source: string): Promise<ValidateOutcome> {
+  const counts: ValidateCounts = { memories: 0, skills: 0, nodes: 0 };
+  let raw = '';
+  let isOkfBundle = false;
+
+  if (source.startsWith('http://') || source.startsWith('https://')) {
+    const res = await fetch(source, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    raw = await res.text();
+  } else {
+    const { statSync, readdirSync, readFileSync } = await import('node:fs');
+    let isDir = false;
+    try {
+      isDir = statSync(source).isDirectory();
+    } catch {
+      // not an existing directory — treat as a file below
+    }
+    if (isDir && readdirSync(source).some((n) => n.toLowerCase().endsWith('.md'))) {
+      isOkfBundle = true;
+    } else {
+      raw = readFileSync(source, 'utf-8');
+    }
+  }
+
+  if (isOkfBundle) {
+    const result = validateOkfBundle(source);
+    counts.nodes = await countOkfNodes(source);
+    return { ok: result.valid, kind: 'okf', source, counts, errors: result.errors };
+  }
+
+  const data = JSON.parse(raw);
+  const result = validatePack(data);
+  const obj = data as Record<string, unknown>;
+  counts.memories = Array.isArray(obj.memories) ? obj.memories.length : 0;
+  counts.skills = Array.isArray(obj.skills) ? obj.skills.length : 0;
+  return { ok: result.valid, kind: 'pack', source, counts, errors: result.errors };
+}
+
+/** Recursively count non-reserved `.md` files under `dir` (mirror of okf.ts). */
+async function countOkfNodes(dir: string): Promise<number> {
+  const { readdirSync, statSync } = await import('node:fs');
+  const { join, basename } = await import('node:path');
+  let nodes = 0;
+  const walk = (d: string): void => {
+    for (const name of readdirSync(d)) {
+      const full = join(d, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+      } else if (name.toLowerCase().endsWith('.md') && !OKF_RESERVED.has(basename(full))) {
+        nodes++;
+      }
+    }
+  };
+  walk(dir);
+  return nodes;
 }
