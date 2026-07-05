@@ -3,6 +3,7 @@ import { RepoMemory } from '@rckflr/repomemory';
 import * as RepoMemoryNS from '@rckflr/repomemory';
 import type { MicroExpertConfig } from '../config.js';
 import { MEMORY_DIR } from '../config.js';
+import { validateToolTagContent } from '../pack/validate.js';
 
 /**
  * Feature-detection for optional A2E helpers exported by @rckflr/repomemory.
@@ -494,6 +495,18 @@ export class MemoryProvider {
           console.log('[micro-expert] [debug] sanitizeSecrets not available in this @rckflr/repomemory version — secrets left unsanitized (no-op)');
         }
         const content = `Para ${userQuery.slice(0, 100)}: [A2E: ${sanitizedTag}]`;
+
+        // Deterministic gate: discard malformed patterns before they enter the
+        // store and later get amplified via few-shot recall.
+        const tagCheck = validateToolTagContent(content);
+        if (!tagCheck.valid) {
+          const preview = content.slice(0, 60);
+          console.log(
+            `[micro-expert] few-shot excluded (invalid tool tag): ${preview} — ${tagCheck.errors[0]}`,
+          );
+          continue;
+        }
+
         this.saveMemory(userId, content, 'a2e-workflow', ['a2e', 'workflow', 'mined']);
         saved++;
       }
@@ -606,7 +619,7 @@ function isSkillEntry(entry: MemoryExportEntry): boolean {
      entry.category === 'a2e-error');
 }
 
-function extractFewShotExamples(recalledText: string): FewShotExample[] {
+export function extractFewShotExamples(recalledText: string): FewShotExample[] {
   const examples: FewShotExample[] = [];
   if (!recalledText) return examples;
 
@@ -620,6 +633,18 @@ function extractFewShotExamples(recalledText: string): FewShotExample[] {
     // Strip "[category] [tags] " prefix from recalled memory entry
     // Format: "category] [tag1, tag2, ...] actual content"
     const content = entry.replace(/^[^\]]*\]\s*(?:\[[^\]]*\]\s*)?/, '');
+
+    // Deterministic gate: drop memories whose tool tags are malformed so the
+    // model cannot imitate a broken pattern. The memory stays in the store
+    // and in the normal recall context — only the few-shot example is excluded.
+    const tagCheck = validateToolTagContent(content);
+    if (!tagCheck.valid) {
+      const preview = content.slice(0, 60);
+      console.log(
+        `[micro-expert] few-shot excluded (invalid tool tag): ${preview} — ${tagCheck.errors[0]}`,
+      );
+      continue;
+    }
 
     // Try to extract a tool call tag from the content
     const toolMatch = content.match(/\[(MCP|CALC|FETCH|A2E):\s*[\s\S]*?\]/);

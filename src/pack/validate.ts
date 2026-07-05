@@ -124,21 +124,28 @@ function validateEntries(
 }
 
 /**
- * Validate tool-calling tags within a content string.
- * Reimplements bracket-aware extraction locally (does not import the agent
- * loop) so the validator stays decoupled from runtime tool execution.
+ * Validate tool-calling tags within a content string. Returns unprefixed
+ * error messages (one per problem). Reimplements bracket-aware extraction
+ * locally (does not import the agent loop) so the validator stays decoupled
+ * from runtime tool execution.
+ *
+ * Shared by {@link validateContent} (pack entry validation, prefixed with
+ * the entry location) and {@link validateToolTagContent} (single-content
+ * gate used at the few-shot amplification point).
  */
-function validateContent(content: string, where: string, errors: string[]): void {
+function validateContentTags(content: string): string[] {
+  const errors: string[] = [];
+
   // --- [MCP: tool_name {json_args}] ---
   if (content.includes(MCP_MARKER)) {
     const tags = extractTags(content, MCP_MARKER);
     if (tags.length === 0) {
-      errors.push(`${where}: malformed or unclosed [MCP:] tag.`);
+      errors.push('malformed or unclosed [MCP:] tag.');
     }
     for (const inner of tags) {
       const parsed = parseMcpInner(inner);
       if (!parsed.toolName) {
-        errors.push(`${where}: [MCP:] tag has empty tool name.`);
+        errors.push('[MCP:] tag has empty tool name.');
         continue;
       }
       if (parsed.argsRaw !== '') {
@@ -146,7 +153,7 @@ function validateContent(content: string, where: string, errors: string[]): void
           JSON.parse(parsed.argsRaw);
         } catch {
           errors.push(
-            `${where}: [MCP: ${parsed.toolName}] has invalid JSON args: ${parsed.argsRaw}`,
+            `[MCP: ${parsed.toolName}] has invalid JSON args: ${parsed.argsRaw}`,
           );
         }
       }
@@ -162,22 +169,51 @@ function validateContent(content: string, where: string, errors: string[]): void
 
     if (!method || !FETCH_METHODS.has(method)) {
       errors.push(
-        `${where}: [FETCH:] has invalid method "${method ?? ''}" (expected GET/POST/PUT/DELETE/PATCH).`,
+        `[FETCH:] has invalid method "${method ?? ''}" (expected GET/POST/PUT/DELETE/PATCH).`,
       );
     }
     if (!url || !/^https?:\/\//i.test(url)) {
-      errors.push(
-        `${where}: [FETCH:] URL must be http(s)://, got "${url ?? ''}".`,
-      );
+      errors.push(`[FETCH:] URL must be http(s)://, got "${url ?? ''}".`);
     }
   }
 
   // --- [CALC: expression] ---
   for (const inner of extractTags(content, CALC_MARKER)) {
     if (inner.trim() === '') {
-      errors.push(`${where}: [CALC:] has empty expression.`);
+      errors.push('[CALC:] has empty expression.');
     }
   }
+
+  return errors;
+}
+
+/**
+ * Validate tool-calling tags within a content string for a pack entry.
+ * Delegates to {@link validateContentTags} and prefixes each error with the
+ * entry location so pack validation errors point at the offending entry.
+ */
+function validateContent(content: string, where: string, errors: string[]): void {
+  for (const msg of validateContentTags(content)) {
+    errors.push(`${where}: ${msg}`);
+  }
+}
+
+/**
+ * Validate the tool-calling tags of a single content string. Content with no
+ * tool tags is considered valid ({ valid: true, errors: [] }). Never throws.
+ *
+ * Deterministic gate used at the few-shot amplification point: a malformed
+ * skill memory that would be imitated by the model is dropped from the
+ * few-shot set (the memory itself stays in the store and in the normal
+ * recall context). The rules are identical to those applied per-entry by
+ * {@link validatePack}.
+ */
+export function validateToolTagContent(content: string): PackValidationResult {
+  if (typeof content !== 'string' || content.length === 0) {
+    return { valid: true, errors: [] };
+  }
+  const errors = validateContentTags(content);
+  return { valid: errors.length === 0, errors };
 }
 
 interface McpParsed {
