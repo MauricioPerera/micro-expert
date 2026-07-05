@@ -690,6 +690,25 @@ Users install packs with a single command:
 micro-expert install https://raw.githubusercontent.com/.../packs/n8n-mcp-skills.json
 ```
 
+### OKF Bundles
+
+MicroExpert also supports **OKF (Open Knowledge Format)** as an alternative, interoperable pack format. OKF is a tree of Markdown files — each carrying a YAML frontmatter with a `type` field — defined by the [Open Knowledge Format spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md). JSON packs remain the default format; OKF is the interoperable format for exchanging knowledge bases with external agents and catalogs.
+
+Each non-reserved `.md` becomes a node: `type: Memory` for facts/notes and `type: Skill` for tool-calling patterns (`[MCP: ...]`, `[CALC: ...]`, `[FETCH: ...]`). `index.md` and `log.md` are reserved (not concepts). Unknown frontmatter fields, unknown `type` values, and broken links are tolerated per the spec.
+
+```bash
+# Export as an OKF bundle (a directory of .md files) instead of JSON
+micro-expert export-memories --format okf --pack-name "n8n MCP Skills" --output ./n8n-okf
+
+# Install an OKF bundle from a local directory (auto-detected by .md files)
+micro-expert install ./n8n-okf
+
+# --force bypasses validation failures (e.g., a .md missing frontmatter)
+micro-expert install ./n8n-okf --force
+```
+
+On install, the bundle is checked with `validateOkfBundle` (every non-reserved `.md` must have parseable frontmatter with a non-empty `type`); a failing bundle is rejected with the offending filenames unless `--force` is given.
+
 ### Artificial Experience — Seeding from Tool Metadata
 
 The `seed` command auto-generates skill memories from MCP tool schemas, creating "artificial experience" that bootstraps a small model's ability to use tools without any prior interaction. This is how a larger model's knowledge (embedded in tool descriptions and schemas) can be transferred to optimize a smaller model.

@@ -12,6 +12,8 @@ import { generateSkillSeeds } from '../src/memory/seed.js';
 import { createServer } from '../src/server/http.js';
 import { runSetup } from '../src/setup/wizard.js';
 import { TelegramBot } from '../src/telegram/bot.js';
+import { validatePack } from '../src/pack/validate.js';
+import { exportOkfBundle, importOkfBundle, validateOkfBundle } from '../src/pack/okf.js';
 
 const program = new Command();
 
@@ -211,6 +213,7 @@ program
   .option('--pack-tags <tags>', 'Pack tags for catalog search (comma-separated)')
   .option('--filter <query>', 'Export only memories matching this search query (e.g., "n8n workflow")')
   .option('--tags <tags>', 'Export only memories with these tags (comma-separated, e.g., "n8n,mcp")')
+  .option('--format <format>', 'Export format: "json" (default) or "okf" (Open Knowledge Format bundle)')
   .action(async (opts) => {
     const globalOpts = program.opts();
     const config = loadConfig({
@@ -243,6 +246,25 @@ program
       const exported = memory.exportMemories(userId, packMeta, filter);
       const outputPath = opts.output ?? `memories-${userId}.json`;
 
+      if (opts.format === 'okf') {
+        // OKF bundle: a directory of Markdown files (interoperable format).
+        const { mkdirSync } = await import('node:fs');
+        mkdirSync(outputPath, { recursive: true });
+        exportOkfBundle(
+          exported.memories,
+          exported.skills ?? [],
+          outputPath,
+          packMeta,
+        );
+        const skillCount = exported.skills?.length ?? 0;
+        const memCount = exported.memories.length;
+        console.log(`✅ Exported ${memCount + skillCount} items (${memCount} memories, ${skillCount} skills) as OKF bundle to ${outputPath}`);
+        if (exported.pack?.name) {
+          console.log(`   Pack: "${exported.pack.name}" v${exported.pack.packVersion ?? '0.0.0'}`);
+        }
+        return;
+      }
+
       const { writeFileSync } = await import('node:fs');
       writeFileSync(outputPath, JSON.stringify(exported, null, 2));
 
@@ -268,6 +290,7 @@ program
   .command('import-memories <file>')
   .description('Import memories from a JSON file (v1 or v2 format)')
   .option('--userId <id>', 'User ID to import memories for')
+  .option('--force', 'Import even if pack validation fails (with warning)')
   .action(async (file, opts) => {
     const globalOpts = program.opts();
     const config = loadConfig({
@@ -281,6 +304,19 @@ program
       const { readFileSync } = await import('node:fs');
       const raw = readFileSync(file, 'utf-8');
       const data = JSON.parse(raw);
+
+      const validation = validatePack(data);
+      if (!validation.valid) {
+        if (opts.force) {
+          console.warn('⚠ Pack validation failed (--force in use, importing anyway):');
+          for (const err of validation.errors) console.warn(`   ${err}`);
+        } else {
+          console.error('❌ Pack validation failed — not importing:');
+          for (const err of validation.errors) console.error(`   ${err}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
 
       const result = memory.importMemories(userId, data);
 
@@ -305,6 +341,7 @@ program
   .command('install <source>')
   .description('Install a memory pack from a URL or local file')
   .option('--userId <id>', 'User ID to import for')
+  .option('--force', 'Install even if pack validation fails (with warning)')
   .action(async (source, opts) => {
     const globalOpts = program.opts();
     const config = loadConfig({
@@ -315,7 +352,8 @@ program
     const memory = new MemoryProvider(config);
 
     try {
-      let raw: string;
+      let raw: string = '';
+      let isOkfBundle = false;
 
       if (source.startsWith('http://') || source.startsWith('https://')) {
         // Download from URL (supports GitHub raw URLs)
@@ -324,12 +362,77 @@ program
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         raw = await res.text();
       } else {
-        // Local file
-        const { readFileSync } = await import('node:fs');
-        raw = readFileSync(source, 'utf-8');
+        // Local path: detect an OKF bundle (a directory of .md files).
+        const { statSync, readdirSync } = await import('node:fs');
+        let isDir = false;
+        try {
+          isDir = statSync(source).isDirectory();
+        } catch {
+          // not a path that exists as a directory — treat as a file below
+        }
+        if (isDir && readdirSync(source).some((n) => n.toLowerCase().endsWith('.md'))) {
+          isOkfBundle = true;
+        } else {
+          const { readFileSync } = await import('node:fs');
+          raw = readFileSync(source, 'utf-8');
+        }
+      }
+
+      if (isOkfBundle) {
+        const okfValidation = validateOkfBundle(source);
+        if (!okfValidation.valid) {
+          if (opts.force) {
+            console.warn('⚠ OKF bundle validation failed (--force in use, installing anyway):');
+            for (const err of okfValidation.errors) console.warn(`   ${err}`);
+          } else {
+            console.error('❌ OKF bundle validation failed — not installing:');
+            for (const err of okfValidation.errors) console.error(`   ${err}`);
+            process.exitCode = 1;
+            return;
+          }
+        }
+
+        const { memories, skills, errors } = importOkfBundle(source);
+        const data = {
+          version: 2,
+          exportedAt: new Date().toISOString(),
+          userId,
+          agentId: config.agentId,
+          count: memories.length + skills.length,
+          pack: { name: `OKF Bundle (${source})`, description: 'Imported from an OKF bundle' },
+          memories,
+          skills,
+        };
+
+        const result = memory.importMemories(userId, data);
+
+        console.log(`✅ Installed OKF bundle "${source}":`);
+        console.log(`   Imported: ${result.imported} (${memories.length} memories, ${skills.length} skills)`);
+        if (errors.length > 0) {
+          console.log(`   Skipped files: ${errors.length}`);
+          for (const err of errors) console.log(`     ${err}`);
+        }
+        if (result.errors > 0) {
+          console.log(`   Import errors: ${result.errors}`);
+        }
+        return;
       }
 
       const data = JSON.parse(raw);
+
+      const validation = validatePack(data);
+      if (!validation.valid) {
+        if (opts.force) {
+          console.warn('⚠ Pack validation failed (--force in use, installing anyway):');
+          for (const err of validation.errors) console.warn(`   ${err}`);
+        } else {
+          console.error('❌ Pack validation failed — not installing:');
+          for (const err of validation.errors) console.error(`   ${err}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+
       const result = memory.importMemories(userId, data);
 
       const packName = data.pack?.name ?? source;
