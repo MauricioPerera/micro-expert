@@ -58,6 +58,13 @@ export interface MicroExpertConfig {
     /** Allowed Telegram user IDs (empty = allow all) */
     allowedUsers?: number[];
   };
+  /** A2E (Agent-to-Everything) protocol configuration (optional) */
+  a2e?: {
+    /** URL of the A2E protocol documentation/endpoint */
+    url?: string;
+    /** Secret values to redact from mined A2E workflow patterns */
+    secrets?: Record<string, string>;
+  };
 }
 
 const DEFAULTS: MicroExpertConfig = {

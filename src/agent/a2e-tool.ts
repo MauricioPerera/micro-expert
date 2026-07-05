@@ -11,14 +11,6 @@
 //   {"type":"operationUpdate","operationId":"op-1","operation":{"ApiCall":{...}}}
 //   {"type":"beginExecution","executionId":"exec-1","operationOrder":["op-1"]}
 
-import {
-  sanitizeSecrets,
-  resolveSecrets,
-  validateWorkflow,
-  normalizeResponse,
-  fixJsonl,
-} from '@rckflr/repomemory';
-
 export const A2E_TIMEOUT_MS = 30_000;
 export const A2E_MAX_RESULT_CHARS = 2048;
 
@@ -242,9 +234,71 @@ export async function executeA2e(
   }
 }
 
-// sanitizeSecrets, resolveSecrets imported from @rckflr/repomemory (4-layer sanitization)
-// Re-export for backwards compatibility with existing imports
-export { sanitizeSecrets, resolveSecrets };
+// ─── Secret handling ─────────────────────────────────────────
+// resolveSecrets / sanitizeSecrets are implemented locally. The previous
+// implementation imported them from @rckflr/repomemory, but the installed
+// version (2.16.0) does not export them, so they are provided here.
+
+/**
+ * Replace `{{VAR}}` placeholders in `text` with values from `secrets`.
+ * Unknown placeholders are left untouched.
+ */
+export function resolveSecrets(text: string, secrets: Record<string, string>): string {
+  if (!text) return text;
+  return text.replace(/\{\{(\w+)\}\}/g, (match, name: string) => {
+    return Object.prototype.hasOwnProperty.call(secrets, name) ? String(secrets[name]) : match;
+  });
+}
+
+// Sensitive query-parameter names that should be redacted heuristically
+// when their value is not already a `{{...}}` placeholder.
+const SENSITIVE_PARAM_NAMES = [
+  'apikey',
+  'api_key',
+  'access_token',
+  'accesstoken',
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'appid',
+  'app_id',
+  'auth',
+  'key',
+];
+
+/**
+ * Redact secret values from `text` so it can be shown to the model / logged.
+ *
+ * Two layers:
+ * 1. Known secrets: replace each secret value (length >= 4) with `{{VAR}}`.
+ * 2. Heuristic: redact sensitive query-param values (`apiKey=...`, `token=...`,
+ *    `appid=...`, etc.) with `{{PARAMNAME}}`, unless the value is already a
+ *    `{{...}}` placeholder (so we never double-wrap).
+ */
+export function sanitizeSecrets(text: string, secrets: Record<string, string>): string {
+  if (!text) return text;
+
+  let result = text;
+
+  // Layer 1: known secret values. Only values with length >= 4 to avoid
+  // trivially short substrings matching unrelated tokens.
+  for (const [name, value] of Object.entries(secrets)) {
+    if (typeof value !== 'string' || value.length < 4) continue;
+    if (value.includes('{{') || value.includes('}}')) continue;
+    result = result.split(value).join(`{{${name}}}`);
+  }
+
+  // Layer 2: heuristic redaction of sensitive query params.
+  // Value runs until a delimiter (&, #, whitespace, quote, or bracket).
+  result = result.replace(/([A-Za-z_][A-Za-z0-9_]*)=([^&#\s"'<>{}\\]+)/g, (match, param: string, val: string) => {
+    if (!SENSITIVE_PARAM_NAMES.includes(param.toLowerCase())) return match;
+    if (val.startsWith('{{') && val.endsWith('}}')) return match; // already a placeholder
+    return `${param}={{${param.toUpperCase()}}}`;
+  });
+
+  return result;
+}
 
 /**
  * Validate and repair raw JSONL workflow from LLM output before sending to A2E server.
@@ -254,18 +308,38 @@ export { sanitizeSecrets, resolveSecrets };
  * 3. validateWorkflow: validate structure, auto-synthesize missing beginExecution
  */
 export function repairWorkflow(raw: string): { workflow: string; valid: boolean; autoFixed: boolean } {
-  const normalized = normalizeResponse(raw);
-  const fixed = fixJsonl(normalized);
-  const result = validateWorkflow(fixed);
+  const lines = raw.split('\n').filter(l => l.trim().length > 0);
 
-  if (result.valid) {
-    // Reconstruct clean JSONL from validated messages
-    const cleanLines = result.messages.map(m => JSON.stringify(m));
-    return { workflow: cleanLines.join('\n'), valid: true, autoFixed: result.autoFixed ?? false };
+  let hasBegin = false;
+  let allValid = true;
+  const opIds: string[] = [];
+
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line) as { type?: string; operationId?: unknown };
+      if (obj.type === 'beginExecution') hasBegin = true;
+      if (obj.type === 'operationUpdate' && typeof obj.operationId === 'string') {
+        opIds.push(obj.operationId);
+      }
+    } catch {
+      allValid = false;
+    }
   }
 
-  // Not fully valid but return the best-effort fix
-  return { workflow: fixed, valid: false, autoFixed: false };
+  if (hasBegin) {
+    return { workflow: lines.join('\n'), valid: allValid, autoFixed: false };
+  }
+
+  if (opIds.length > 0) {
+    const beginLine = JSON.stringify({
+      type: 'beginExecution',
+      executionId: `exec-${Date.now()}`,
+      operationOrder: opIds,
+    });
+    return { workflow: [...lines, beginLine].join('\n'), valid: true, autoFixed: true };
+  }
+
+  return { workflow: lines.join('\n'), valid: allValid, autoFixed: false };
 }
 
 function tryParseJson(str: string): unknown {

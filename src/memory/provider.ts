@@ -1,7 +1,29 @@
 import { mkdirSync } from 'node:fs';
-import { RepoMemory, ingestA2EKnowledge, sanitizeSecrets } from '@rckflr/repomemory';
+import { RepoMemory } from '@rckflr/repomemory';
+import * as RepoMemoryNS from '@rckflr/repomemory';
 import type { MicroExpertConfig } from '../config.js';
 import { MEMORY_DIR } from '../config.js';
+
+/**
+ * Feature-detection for optional A2E helpers exported by @rckflr/repomemory.
+ *
+ * `ingestA2EKnowledge` and `sanitizeSecrets` were introduced after the
+ * currently-published 2.16.0 release; the code that consumes them was written
+ * against an unreleased 2.19.0 API. To keep build green against 2.16.0 without
+ * deleting the A2E logic, we resolve them dynamically off the module namespace
+ * and degrade to a silent no-op (with a single debug log) when absent. When a
+ * future @rckflr/repomemory version re-exports these functions, the existing
+ * call sites light up automatically — no code change required.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const RM_NS = RepoMemoryNS as any;
+const A2E_INGEST: ((repo: RepoMemory, agentId: string) => void) | undefined =
+  typeof RM_NS.ingestA2EKnowledge === 'function' ? RM_NS.ingestA2EKnowledge : undefined;
+const A2E_SANITIZE: ((input: string, secrets: Record<string, string>) => string) | undefined =
+  typeof RM_NS.sanitizeSecrets === 'function' ? RM_NS.sanitizeSecrets : undefined;
+
+let a2eIngestNoopWarned = false;
+let a2eSanitizeNoopWarned = false;
 
 /** Simple text-only message (for memory storage — no vision/multimodal). */
 export interface TextMessage {
@@ -113,7 +135,12 @@ export class MemoryProvider {
 
     // Ingest A2E protocol documentation as knowledge (idempotent via saveOrUpdate)
     if (config.a2e?.url) {
-      ingestA2EKnowledge(this.repo, this.agentId);
+      if (A2E_INGEST) {
+        A2E_INGEST(this.repo, this.agentId);
+      } else if (!a2eIngestNoopWarned) {
+        a2eIngestNoopWarned = true;
+        console.log('[micro-expert] [debug] ingestA2EKnowledge not available in this @rckflr/repomemory version — A2E knowledge ingestion skipped (no-op)');
+      }
     }
 
     if (ai) {
@@ -459,7 +486,13 @@ export class MemoryProvider {
       }
 
       if (userQuery) {
-        const sanitizedTag = sanitizeSecrets(tagContent, this.a2eSecrets);
+        let sanitizedTag = tagContent;
+        if (A2E_SANITIZE) {
+          sanitizedTag = A2E_SANITIZE(tagContent, this.a2eSecrets);
+        } else if (!a2eSanitizeNoopWarned) {
+          a2eSanitizeNoopWarned = true;
+          console.log('[micro-expert] [debug] sanitizeSecrets not available in this @rckflr/repomemory version — secrets left unsanitized (no-op)');
+        }
         const content = `Para ${userQuery.slice(0, 100)}: [A2E: ${sanitizedTag}]`;
         this.saveMemory(userId, content, 'a2e-workflow', ['a2e', 'workflow', 'mined']);
         saved++;
