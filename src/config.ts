@@ -37,6 +37,8 @@ export interface MicroExpertConfig {
   contextBudget: number;
   /** Enable thinking mode (Qwen3.5) — off by default for stability */
   thinkingMode: boolean;
+  /** Enable built-in CALC/FETCH tool tags (instructions + post-processing). Default true. */
+  builtinTools: boolean;
   /** Internal port for llama-server (auto-assigned if 0) */
   llamaServerPort: number;
   /** Context size for llama-server */
@@ -81,6 +83,7 @@ const DEFAULTS: MicroExpertConfig = {
   recallLimit: 5,
   contextBudget: 4096,
   thinkingMode: false,
+  builtinTools: true,
   llamaServerPort: 0,
   contextSize: 4096,
   threads: 0,
@@ -104,6 +107,7 @@ const ENV_MAP: Partial<Record<keyof MicroExpertConfig, string>> = {
   recallLimit: 'MICRO_EXPERT_RECALL_LIMIT',
   contextBudget: 'MICRO_EXPERT_CONTEXT_BUDGET',
   thinkingMode: 'MICRO_EXPERT_THINKING',
+  builtinTools: 'MICRO_EXPERT_BUILTIN_TOOLS',
   contextSize: 'MICRO_EXPERT_CONTEXT_SIZE',
   threads: 'MICRO_EXPERT_THREADS',
   recallTemplate: 'MICRO_EXPERT_RECALL_TEMPLATE',
