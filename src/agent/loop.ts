@@ -149,14 +149,22 @@ export class AgentLoop {
    * If execution fails, replaced with [error: message].
    */
   private async processToolCalls(content: string): Promise<string> {
-    // 0. Unwrap tool tags from markdown code blocks (small models often wrap them)
-    //    Handles ```mcp, ```json, ```text, or bare ``` fences containing tool tags.
-    content = unwrapCodeBlocks(content);
-
     // Built-in CALC/FETCH post-processing is gated on config.builtinTools.
     // When disabled, any [CALC:]/[FETCH:] tag the model emits is left as literal
     // text — it is NOT executed, so it can't be replaced with a tool error.
     const builtinToolsEnabled = this.config.builtinTools !== false;
+
+    // 0. Unwrap tool tags from markdown code blocks (small models often wrap them).
+    //    Handles ```mcp, ```json, ```text, or bare ``` fences containing tool tags.
+    //    The unwrap step honors the SAME gates as execution below: CALC/FETCH only
+    //    unwrap when builtinTools is enabled, MCP only when an MCP client is
+    //    available. Otherwise a disabled gate would still mutate the response
+    //    (e.g. with builtinTools=false a fenced [FETCH: ...] would be unwrapped
+    //    and left as a bare tag, altering bytes that should be preserved verbatim).
+    const allowedTags: TagKind[] = [];
+    if (builtinToolsEnabled) allowedTags.push('CALC', 'FETCH');
+    if (this.mcp) allowedTags.push('MCP');
+    content = unwrapCodeBlocks(content, allowedTags);
 
     // 1. Process CALC tags (synchronous)
     if (builtinToolsEnabled) {
@@ -328,18 +336,24 @@ function stripThinkingTokens(content: string): string {
   return content.trim();
 }
 
+type TagKind = 'CALC' | 'FETCH' | 'MCP';
+
 /**
  * Unwrap tool tags that the model wrapped in markdown code fences.
  * E.g., ```mcp\n[MCP: tool {args}]\n``` → [MCP: tool {args}]
- * Only unwraps blocks whose content contains tool tags ([CALC:, [FETCH:, [MCP:).
+ * Only unwraps blocks whose content contains one of `allowedTags`, so the unwrap
+ * step respects the same gates as execution (builtinTools / MCP availability)
+ * and never alters the response for a tool kind that is disabled.
  */
-function unwrapCodeBlocks(content: string): string {
-  return content.replace(/```(?:\w*)\n([\s\S]*?)```/g, (_match, inner: string) => {
+function unwrapCodeBlocks(content: string, allowedTags: TagKind[] = ['CALC', 'FETCH', 'MCP']): string {
+  if (allowedTags.length === 0) return content;
+  const tagPattern = new RegExp(`\\[(?:${allowedTags.join('|')}):`);
+  return content.replace(/```(?:\w*)\n([\s\S]*?)```/g, (match, inner: string) => {
     const trimmed = inner.trim();
-    if (/\[(CALC|FETCH|MCP):/.test(trimmed)) {
+    if (tagPattern.test(trimmed)) {
       return trimmed;
     }
-    return _match; // Not a tool block — leave it alone
+    return match; // Not an allowed tool block — leave it alone
   });
 }
 

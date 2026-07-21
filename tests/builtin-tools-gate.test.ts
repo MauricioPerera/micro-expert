@@ -3,11 +3,42 @@ import { AgentLoop } from '../src/agent/loop.js';
 import type { InferenceClient, ChatMessage, StreamDelta } from '../src/inference/client.js';
 import type { MemoryProvider, RecallResult } from '../src/memory/provider.js';
 import type { McpClientManager } from '../src/mcp/index.js';
-import { loadConfig } from '../src/config.js';
+import type { MicroExpertConfig } from '../src/config.js';
 
-/** Build a config with builtinTools overridden (defaults are otherwise untouched). */
-function configWith(builtinTools: boolean) {
-  return { ...loadConfig(), builtinTools };
+/**
+ * Hermetic base config — a literal object, no disk/env reads.
+ * Mirrors the DEFAULTS in src/config.ts for the fields the agent loop touches;
+ * paths are inert placeholders (AgentLoop never reaches the filesystem or
+ * llama-server in these tests). Keeping this self-contained means the suite
+ * result does not depend on the host's ~/.micro-expert/config.json or env vars.
+ */
+const BASE_CONFIG: MicroExpertConfig = {
+  modelPath: '/tmp/model.gguf',
+  llamaServerPath: '/tmp/llama-server',
+  port: 3333,
+  host: '127.0.0.1',
+  agentId: 'micro-expert',
+  defaultUserId: 'local',
+  idleTimeout: 300,
+  maxTokens: 512,
+  temperature: 0.7,
+  topP: 0.9,
+  recallLimit: 5,
+  contextBudget: 4096,
+  thinkingMode: false,
+  builtinTools: true,
+  llamaServerPort: 0,
+  contextSize: 4096,
+  threads: 0,
+  recallTemplate: 'default',
+  mcpServers: {},
+  mcpMaxTools: 10,
+  mmprojPath: '',
+};
+
+/** Build a hermetic config with builtinTools overridden (all else fixed). */
+function configWith(builtinTools: boolean): MicroExpertConfig {
+  return { ...BASE_CONFIG, builtinTools };
 }
 
 /** Mock inference client returning a fixed response string. */
@@ -112,6 +143,18 @@ describe('builtinTools gate', () => {
       const result = await agent.run({ message: 'calc', userId: 'u' });
       expect(result.content).toBe('Math: 42');
     });
+
+    it('unwraps and executes a fenced [CALC:] block when builtinTools is true', async () => {
+      // Positive control for the unwrap gate: when built-ins are enabled, the
+      // fence IS unwrapped and the tag IS executed.
+      const inference = mockInferenceClient('Result:\n```\n[CALC: 5 * 10]\n```');
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, configWith(true));
+
+      const result = await agent.run({ message: 'calc', userId: 'u' });
+      expect(result.content).toBe('Result:\n50');
+      expect(result.content).not.toContain('```');
+    });
   });
 
   describe('builtinTools = false — instructions removed, tags left literal', () => {
@@ -174,6 +217,42 @@ describe('builtinTools gate', () => {
       // Tag preserved verbatim — no "[error: Fetch failed]" replacement.
       expect(result.content).toBe('See [FETCH: GET https://example.com]');
       expect(result.content).not.toContain('[error:');
+    });
+
+    it('leaves a fenced [FETCH:] block intact byte-for-byte when builtinTools is false', async () => {
+      // The unwrap step must honor the builtinTools gate: a fenced [FETCH: ...]
+      // is NOT unwrapped (which would rewrite the response) when built-ins are off.
+      const fenced = 'See:\n```mcp\n[FETCH: GET https://example.com]\n```\nDone.';
+      const inference = mockInferenceClient(fenced);
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, configWith(false));
+
+      const result = await agent.run({ message: 'fetch', userId: 'u' });
+      expect(result.content).toBe(fenced);
+      expect(result.content).not.toContain('[error:');
+    });
+
+    it('leaves a fenced [CALC:] block intact byte-for-byte when builtinTools is false', async () => {
+      const fenced = 'Result:\n```\n[CALC: 6 * 7]\n```';
+      const inference = mockInferenceClient(fenced);
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, configWith(false));
+
+      const result = await agent.run({ message: 'calc', userId: 'u' });
+      expect(result.content).toBe(fenced);
+    });
+
+    it('leaves a fenced [MCP:] block intact when no MCP client is configured', async () => {
+      // The unwrap step must honor the MCP-availability gate: a fenced [MCP: ...]
+      // is NOT unwrapped when the agent has no MCP tools (mirrors the system-prompt
+      // criterion in buildMessages).
+      const fenced = 'Do:\n```mcp\n[MCP: greet {"name": "World"}]\n```';
+      const inference = mockInferenceClient(fenced);
+      const memory = mockMemoryProvider();
+      const agent = new AgentLoop(inference, memory, configWith(false)); // no mcp arg
+
+      const result = await agent.run({ message: 'greet', userId: 'u' });
+      expect(result.content).toBe(fenced);
     });
 
     it('still processes [MCP:] tags when builtinTools is false (MCP branch unchanged)', async () => {
