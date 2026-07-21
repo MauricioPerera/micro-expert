@@ -3,6 +3,7 @@ import { RepoMemory } from '@rckflr/repomemory';
 import * as RepoMemoryNS from '@rckflr/repomemory';
 import type { MicroExpertConfig } from '../config.js';
 import { MEMORY_DIR } from '../config.js';
+import type { RagLocalConfig } from '../config.js';
 import { validateToolTagContent } from '../pack/validate.js';
 
 /**
@@ -113,6 +114,8 @@ export class MemoryProvider {
   private readonly relevanceThreshold: number;
   private readonly a2eSecrets: Record<string, string>;
   private miningEnabled = false;
+  private readonly retrievalProvider: 'repomemory' | 'rag-local';
+  private readonly ragLocalConfig: Readonly<RagLocalResolved> | undefined;
 
   constructor(config: MicroExpertConfig, ai?: AiProvider) {
     this.agentId = config.agentId;
@@ -121,6 +124,8 @@ export class MemoryProvider {
     this.recallTemplate = config.recallTemplate;
     this.relevanceThreshold = config.relevanceThreshold;
     this.a2eSecrets = config.a2e?.secrets || {};
+    this.retrievalProvider = config.retrieval?.provider ?? 'repomemory';
+    this.ragLocalConfig = resolveRagLocalConfig(config);
 
     // Ensure memory directory exists
     mkdirSync(MEMORY_DIR, { recursive: true });
@@ -175,11 +180,36 @@ export class MemoryProvider {
   }
 
   /**
-   * Recall relevant context for a query using CTT scoring.
-   * Returns formatted context string ready for system prompt injection.
+   * Recall relevant context for a query.
+   *
+   * This is the ONLY pluggable step in the memory pipeline: sessions, mining,
+   * profiles, import/export and few-shot skill packs always stay on RepoMemory
+   * (see saveSession/mine/saveProfile/exportMemories below) — switching the
+   * retrieval provider redirects just this read path.
+   *
+   * With the default `repomemory` provider the returned {@link RecallResult} is
+   * byte-identical to the original synchronous behavior (same formatted string,
+   * same item count, same few-shot examples). With `rag-local` the formatted
+   * context is built from the remote hits' descriptions and `fewShot` is always
+   * empty; any fetch/timeout error degrades to an empty result — the user's
+   * request is NEVER crashed by the external retrieval.
    */
-  recall(query: string, userId: string): RecallResult {
-    const result = this.repo.recall(this.agentId, userId, query, {
+  async recall(query: string, userId: string): Promise<RecallResult> {
+    if (this.retrievalProvider === 'rag-local') {
+      return this.recallRagLocal(query);
+    }
+    return this.recallRepoMemory(query, userId);
+  }
+
+  /**
+   * RepoMemory-backed recall — the default path. Byte-identical to the original
+   * synchronous behavior: same CTT query, same relevance gate, same few-shot
+   * extraction, same returned object. `repo.recall` is itself synchronous, but
+   * we await it uniformly so callers see one async contract regardless of
+   * provider (awaiting a non-thenable value resolves immediately).
+   */
+  private async recallRepoMemory(query: string, userId: string): Promise<RecallResult> {
+    const result = await this.repo.recall(this.agentId, userId, query, {
       maxItems: this.recallLimit,
       maxChars: this.contextBudget,
       template: this.recallTemplate,
@@ -216,6 +246,69 @@ export class MemoryProvider {
       estimatedChars: result.estimatedChars,
       fewShot,
     };
+  }
+
+  /**
+   * rag-local-backed recall — opt-in remote path.
+   *
+   * POSTs `{ text, k, threshold, expand_links, hops }` to
+   * `<url>/collections/<collection>/query` and builds the formatted context
+   * from the returned hits. fewShot is ALWAYS empty here: skill/tool-example
+   * packs live in RepoMemory and are not exposed through rag-local. The
+   * `relevanceThreshold` gate does NOT apply (it operates on RepoMemory's
+   * non-normalized score scale); the rag-local `threshold` is enforced
+   * server-side via the request body.
+   *
+   * On no hits, fetch failure, non-2xx response, or timeout, this returns an
+   * empty RecallResult (after a `console.warn`) — never throws. Expanded hits
+   * (which carry `score: null`) are included in the formatted output.
+   */
+  private async recallRagLocal(query: string): Promise<RecallResult> {
+    const empty: RecallResult = { formatted: '', totalItems: 0, estimatedChars: 0, fewShot: [] };
+    const cfg = this.ragLocalConfig;
+    if (!cfg) {
+      console.warn('[micro-expert] rag-local retrieval selected but no ragLocal config provided — returning empty context');
+      return empty;
+    }
+
+    const url = `${cfg.url.replace(/\/+$/, '')}/collections/${encodeURIComponent(cfg.collection)}/query`;
+    const body = {
+      text: query,
+      k: cfg.k,
+      threshold: cfg.threshold,
+      expand_links: cfg.expandLinks,
+      hops: cfg.hops,
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        console.warn(`[micro-expert] rag-local query failed: HTTP ${res.status} ${res.statusText} — returning empty context`);
+        return empty;
+      }
+      const hits = await res.json() as RagLocalHit[];
+      if (!Array.isArray(hits) || hits.length === 0) return empty;
+
+      const lines = hits.map(h => `- ${renderMarkdownLinksToPlain(h.description ?? '')}`);
+      const formatted = `Facts from memory:\n${lines.join('\n')}`;
+      return { formatted, totalItems: hits.length, estimatedChars: formatted.length, fewShot: [] };
+    } catch (e) {
+      const err = e as Error;
+      const reason = err.name === 'AbortError'
+        ? `timed out after ${cfg.timeoutMs}ms`
+        : `failed: ${err.message}`;
+      console.warn(`[micro-expert] rag-local query ${reason} — returning empty context`);
+      return empty;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -719,4 +812,65 @@ export function extractFewShotExamples(recalledText: string): FewShotExample[] {
   }
 
   return examples;
+}
+
+/** A hit returned by a rag-local `POST /collections/<name>/query` request. */
+interface RagLocalHit {
+  id: string;
+  /** Cosine similarity in [0,1]; `null` for expanded (link-followed) hits. */
+  score: number | null;
+  /** Hit text — may contain markdown links like `[label](node-id)`. */
+  description: string;
+  /** True when this hit was reached via graph-link expansion. */
+  expanded?: boolean;
+  /** Node IDs the hit was reached through (when expanded). */
+  via?: string[];
+}
+
+/** rag-local config with all defaults resolved (used by the recall path). */
+interface RagLocalResolved {
+  url: string;
+  collection: string;
+  k: number;
+  threshold: number;
+  expandLinks: boolean;
+  hops: number;
+  timeoutMs: number;
+}
+
+const RAG_LOCAL_DEFAULTS: Omit<RagLocalResolved, 'collection'> = {
+  url: 'http://127.0.0.1:8937',
+  k: 5,
+  threshold: 0.35,
+  expandLinks: true,
+  hops: 2,
+  timeoutMs: 10_000,
+};
+
+/**
+ * Resolve the optional {@link RagLocalConfig} from the user's config into a
+ * fully-populated object with defaults applied. Returns `undefined` when no
+ * rag-local config is present (the repomemory path is used instead).
+ */
+function resolveRagLocalConfig(config: MicroExpertConfig): Readonly<RagLocalResolved> | undefined {
+  const raw = config.retrieval?.ragLocal;
+  if (!raw) return undefined;
+  return {
+    url: raw.url ?? RAG_LOCAL_DEFAULTS.url,
+    collection: raw.collection,
+    k: raw.k ?? RAG_LOCAL_DEFAULTS.k,
+    threshold: raw.threshold ?? RAG_LOCAL_DEFAULTS.threshold,
+    expandLinks: raw.expandLinks ?? RAG_LOCAL_DEFAULTS.expandLinks,
+    hops: raw.hops ?? RAG_LOCAL_DEFAULTS.hops,
+    timeoutMs: raw.timeoutMs ?? RAG_LOCAL_DEFAULTS.timeoutMs,
+  };
+}
+
+/**
+ * Render markdown links to plain text: `[label](target)` → `label`.
+ * rag-local descriptions may embed links like `[repo name](node:abc)`; we keep
+ * only the label so the injected context reads as plain facts.
+ */
+function renderMarkdownLinksToPlain(text: string): string {
+  return text.replace(/\[([^\]]+)\]\(([^)]*)\)/g, '$1');
 }

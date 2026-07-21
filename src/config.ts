@@ -84,6 +84,65 @@ export interface MicroExpertConfig {
     /** Secret values to redact from mined A2E workflow patterns */
     secrets?: Record<string, string>;
   };
+  /**
+   * Pluggable retrieval provider for the context-recall step (opt-in).
+   *
+   * See {@link RetrievalConfig}. Default `"repomemory"` is byte-identical to the
+   * pre-existing behavior — no change unless explicitly switched to rag-local.
+   * Only the read path (context recall) is pluggable; sessions, mining,
+   * profiles, import/export and few-shot skill packs always stay on RepoMemory.
+   */
+  retrieval?: RetrievalConfig;
+}
+
+/**
+ * Pluggable retrieval configuration for the context-recall step.
+ *
+ * Default `provider: "repomemory"` uses the embedded RepoMemory CTT store — the
+ * returned {@link RecallResult} is byte-identical to the original behavior. Set
+ * `provider: "rag-local"` to route context recall to a rag-local server
+ * (https://github.com/rckflr/rag-local) via its
+ * `POST /collections/<collection>/query` endpoint, which returns an array of
+ * hits: `[{ id, score, description, expanded?, via? }]`.
+ *
+ * When rag-local is selected, the formatted context is built from the returned
+ * `description` fields (markdown links rendered to plain text) and `fewShot` is
+ * always empty — skill/tool-example packs live in RepoMemory and are NOT
+ * available through rag-local. Sessions, mining, profiles and import/export
+ * remain 100% on RepoMemory regardless of provider.
+ *
+ * @warning rag-local scores are cosine similarities in roughly [0,1]; the
+ * `threshold` MUST be calibrated empirically against your own collection (log
+ * scores for on-topic vs. off-topic queries and pick a cutoff). A value too
+ * high suppresses all context; too low injects noise. 0.35 is a conservative
+ * starting point, not a universally correct one.
+ */
+export interface RetrievalConfig {
+  /** Which provider backs context recall. Default `"repomemory"`. */
+  provider: 'repomemory' | 'rag-local';
+  /** rag-local connection settings — required when `provider === "rag-local"`. */
+  ragLocal?: RagLocalConfig;
+}
+
+/**
+ * Connection settings for a rag-local retrieval server.
+ * All fields except `collection` have defaults; `collection` is required.
+ */
+export interface RagLocalConfig {
+  /** Base URL of the rag-local server (no trailing path). Default `http://127.0.0.1:8937`. */
+  url?: string;
+  /** Collection name to query — REQUIRED when provider is rag-local. */
+  collection: string;
+  /** Max hits to retrieve. Default 5. */
+  k?: number;
+  /** Minimum cosine similarity for a hit. CALIBRATE THIS — see {@link RetrievalConfig}. Default 0.35. */
+  threshold?: number;
+  /** Whether the server expands graph links in results. Default true. */
+  expandLinks?: boolean;
+  /** Graph-expansion hops. Default 2. */
+  hops?: number;
+  /** Request timeout in ms. On timeout the recall degrades to an empty result (never throws). Default 10000. */
+  timeoutMs?: number;
 }
 
 const DEFAULTS: MicroExpertConfig = {

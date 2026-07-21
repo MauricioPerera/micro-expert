@@ -66,7 +66,7 @@ export class AgentLoop {
    */
   async run(request: AgentRequest): Promise<AgentResponse> {
     // 1. Recall context from memory
-    const recall = this.memory.recall(request.message, request.userId);
+    const recall = await this.memory.recall(request.message, request.userId);
 
     // 2. Build messages (with few-shot examples from memory)
     const messages = this.buildMessages(request, recall.formatted, recall.fewShot);
@@ -109,7 +109,7 @@ export class AgentLoop {
    */
   async *runStream(request: AgentRequest): AsyncGenerator<StreamDelta> {
     // 1. Recall context from memory
-    const recall = this.memory.recall(request.message, request.userId);
+    const recall = await this.memory.recall(request.message, request.userId);
 
     // 2. Build messages (with few-shot examples from memory)
     const messages = this.buildMessages(request, recall.formatted, recall.fewShot);

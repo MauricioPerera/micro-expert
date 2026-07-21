@@ -37,7 +37,7 @@ describe('MemoryProvider', () => {
     expect(provider.healthCheck()).toBe(true);
   });
 
-  it('should save and recall a memory', () => {
+  it('should save and recall a memory', async () => {
     createProvider();
     const userId = 'test-user';
 
@@ -45,7 +45,7 @@ describe('MemoryProvider', () => {
     provider.saveMemory(userId, 'The project uses TypeScript', 'fact', ['tech']);
 
     // Recall should find it
-    const result = provider.recall('What language does the project use?', userId);
+    const result = await provider.recall('What language does the project use?', userId);
     expect(result.totalItems).toBeGreaterThan(0);
     expect(result.formatted).toContain('TypeScript');
   });
