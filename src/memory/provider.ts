@@ -110,6 +110,7 @@ export class MemoryProvider {
   private readonly recallLimit: number;
   private readonly contextBudget: number;
   private readonly recallTemplate: string;
+  private readonly relevanceThreshold: number;
   private readonly a2eSecrets: Record<string, string>;
   private miningEnabled = false;
 
@@ -118,6 +119,7 @@ export class MemoryProvider {
     this.recallLimit = config.recallLimit;
     this.contextBudget = config.contextBudget;
     this.recallTemplate = config.recallTemplate;
+    this.relevanceThreshold = config.relevanceThreshold;
     this.a2eSecrets = config.a2e?.secrets || {};
 
     // Ensure memory directory exists
@@ -185,6 +187,23 @@ export class MemoryProvider {
       includeSharedSkills: true,
       includeSharedKnowledge: true,
     });
+
+    // Relevance gate: when a positive threshold is configured, suppress context
+    // injection entirely if the best recovered item is not relevant enough.
+    // The score is RepoMemory's hybrid ranking score (non-normalized scale) —
+    // see `relevanceThreshold` in config.ts. We take the MAX across all three
+    // collections so a single on-topic item is enough to admit the context.
+    // On gate, we return a fully empty RecallResult (no profile, no few-shot,
+    // no formatted) — zero injection. When the max meets the threshold, the
+    // formatted context is returned UNCHANGED (we do not filter individual
+    // items); per-item filtering is an explicit follow-up, out of scope here.
+    if (this.relevanceThreshold > 0) {
+      const all = [...result.memories, ...result.skills, ...result.knowledge];
+      const maxScore = all.length > 0 ? Math.max(...all.map(r => r.score)) : 0;
+      if (maxScore < this.relevanceThreshold) {
+        return { formatted: '', totalItems: 0, estimatedChars: 0, fewShot: [] };
+      }
+    }
 
     // Extract few-shot examples from recalled memories that contain tool patterns.
     // Memories with "[MCP: ...]", "[CALC: ...]", or "[FETCH: ...]" are converted to

@@ -47,6 +47,23 @@ export interface MicroExpertConfig {
   threads: number;
   /** Recall template: default, technical, support, rag_focused */
   recallTemplate: string;
+  /**
+   * Minimum relevance score required to inject CTT context (0 = disabled).
+   *
+   * The score is RepoMemory's hybrid ranking score (TF-IDF + semantic + recency
+   * pooling) — a NON-normalized scale whose range depends on store size, query
+   * length, and the active recall template. There is no universal "good" value;
+   * the user must calibrate it empirically against their own store (e.g. log
+   * scores for on-topic vs. off-topic queries and pick a cutoff).
+   *
+   * 0 (default) preserves the original behavior: every recall is injected
+   * verbatim regardless of score. Any value > 0 gates injection — when the
+   * maximum score across all recalled items (memories + skills + knowledge)
+   * falls below the threshold, MemoryProvider.recall returns an empty context
+   * (no injection). When the max meets the threshold, the formatted context is
+   * returned untouched (items are NOT filtered individually).
+   */
+  relevanceThreshold: number;
   /** MCP server configurations (same format as claude_desktop_config.json) */
   mcpServers: Record<string, McpServerConfig>;
   /** Maximum number of MCP tools to expose to the model (sub-1B models need short prompts) */
@@ -91,6 +108,7 @@ const DEFAULTS: MicroExpertConfig = {
   mcpServers: {},
   mcpMaxTools: 10,
   mmprojPath: '',
+  relevanceThreshold: 0,
 };
 
 /** Environment variable mapping (MICRO_EXPERT_ prefix) */
@@ -112,6 +130,7 @@ const ENV_MAP: Partial<Record<keyof MicroExpertConfig, string>> = {
   threads: 'MICRO_EXPERT_THREADS',
   recallTemplate: 'MICRO_EXPERT_RECALL_TEMPLATE',
   mmprojPath: 'MICRO_EXPERT_MMPROJ_PATH',
+  relevanceThreshold: 'MICRO_EXPERT_RELEVANCE_THRESHOLD',
 };
 
 /** Load config file if it exists */
