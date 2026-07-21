@@ -825,10 +825,47 @@ and the investigation trail in [#3](https://github.com/MauricioPerera/micro-expe
 For maximum retrieval quality you can pair MicroExpert with
 [rag-local](https://github.com/MauricioPerera/rag-local) — semantic embeddings
 (embeddinggemma-300m), per-collection **knowledge contracts**, score
-`threshold`, and multi-hop **link expansion**. This is a **host-side pattern**,
-not a built-in flag: your host code queries rag-local first and hands the
-retrieved facts to the model as context, so the LLM never orchestrates
-retrieval (small models must not — see the tool-imitation findings in #3).
+`threshold`, and multi-hop **link expansion**. Retrieval is always
+host-orchestrated: MicroExpert queries rag-local and hands the retrieved facts
+to the model as context, so the LLM never orchestrates retrieval (small models
+must not — see the tool-imitation findings in #3).
+
+**Native support** — set the `retrieval` block in
+`~/.micro-expert/config.json` and MicroExpert's own recall queries rag-local
+instead of RepoMemory (no glue code):
+
+```json
+{
+  "retrieval": {
+    "provider": "rag-local",
+    "ragLocal": {
+      "url": "http://127.0.0.1:8937",
+      "collection": "kb",
+      "k": 5,
+      "threshold": 0.35,
+      "expandLinks": true,
+      "hops": 2,
+      "timeoutMs": 10000
+    }
+  }
+}
+```
+
+- Default is `"provider": "repomemory"` — behavior untouched when the block is
+  absent.
+- **Only context recall is pluggable**: sessions, mining, profiles and memory
+  packs stay on RepoMemory. Under rag-local, `fewShot` is always empty.
+- `threshold` here is rag-local's cosine score (0-1), sent in the query body.
+  It is unrelated to `relevanceThreshold`, which operates on RepoMemory's
+  unnormalized hybrid scale — the two never mix.
+- Resilience: if rag-local is unreachable or times out, MicroExpert logs a
+  warning and answers with empty context — user requests never fail because of
+  the external retriever.
+- Retrieved facts have markdown links rendered to plain text before injection.
+
+The manual host-side variant (query rag-local yourself, build the prompt, call
+any OpenAI-compatible endpoint) remains valid for stacks that don't run
+MicroExpert:
 
 ```
 question ──► rag-local  POST /collections/kb/query
