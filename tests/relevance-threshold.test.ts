@@ -75,7 +75,7 @@ const FORMATTED_WITH_TOOL =
   '- [fact] [geo] The capital of France is Paris.';
 
 describe('relevanceThreshold gate', () => {
-  it('default 0 — passthrough exact even when scores are tiny', () => {
+  it('default 0 — passthrough exact even when scores are tiny', async () => {
     const ctx: MockRecallContext = {
       memories: [{ entity: { content: 'x' }, score: 0.01 }],
       skills: [{ entity: { content: 'y' }, score: 0.02 }],
@@ -87,7 +87,7 @@ describe('relevanceThreshold gate', () => {
     };
     const provider = makeProvider(0, ctx); // threshold disabled
 
-    const result = provider.recall('What is the capital of France?', 'local');
+    const result = await provider.recall('What is the capital of France?', 'local');
 
     // No gating at all — formatted returned verbatim, counts intact.
     expect(result.formatted).toBe('CTX-low-score');
@@ -95,7 +95,7 @@ describe('relevanceThreshold gate', () => {
     expect(result.estimatedChars).toBe(13);
   });
 
-  it('threshold active + all scores below → empty RecallResult', () => {
+  it('threshold active + all scores below → empty RecallResult', async () => {
     const ctx: MockRecallContext = {
       memories: [{ entity: { content: 'x' }, score: 0.1 }],
       skills: [{ entity: { content: 'y' }, score: 0.2 }],
@@ -107,7 +107,7 @@ describe('relevanceThreshold gate', () => {
     };
     const provider = makeProvider(0.5, ctx); // max score 0.2 < 0.5
 
-    const result = provider.recall('What is the capital of France?', 'local');
+    const result = await provider.recall('What is the capital of France?', 'local');
 
     expect(result.formatted).toBe('');
     expect(result.totalItems).toBe(0);
@@ -115,7 +115,7 @@ describe('relevanceThreshold gate', () => {
     expect(result.fewShot).toEqual([]);
   });
 
-  it('threshold active + at least one score above → passthrough intact (formatted identical to mock)', () => {
+  it('threshold active + at least one score above → passthrough intact (formatted identical to mock)', async () => {
     const ctx: MockRecallContext = {
       memories: [{ entity: { content: 'x' }, score: 0.1 }],
       skills: [{ entity: { content: 'y' }, score: 0.9 }], // meets the 0.5 threshold
@@ -127,7 +127,7 @@ describe('relevanceThreshold gate', () => {
     };
     const provider = makeProvider(0.5, ctx);
 
-    const result = provider.recall('how do I greet?', 'local');
+    const result = await provider.recall('how do I greet?', 'local');
 
     // The formatted string is returned byte-for-byte (NOT reconstructed/filtered).
     expect(result.formatted).toBe('CTX-exact-formatted-string');
@@ -135,10 +135,10 @@ describe('relevanceThreshold gate', () => {
     expect(result.estimatedChars).toBe(25);
   });
 
-  it('threshold active + empty store (no items) → empty result, no crash', () => {
+  it('threshold active + empty store (no items) → empty result, no crash', async () => {
     const provider = makeProvider(0.5, emptyContext());
 
-    const result = provider.recall('What is the capital of France?', 'local');
+    const result = await provider.recall('What is the capital of France?', 'local');
 
     expect(result.formatted).toBe('');
     expect(result.totalItems).toBe(0);
@@ -146,7 +146,7 @@ describe('relevanceThreshold gate', () => {
     expect(result.fewShot).toEqual([]);
   });
 
-  it('fewShot is also empty when the gate triggers (even with tool patterns in formatted)', () => {
+  it('fewShot is also empty when the gate triggers (even with tool patterns in formatted)', async () => {
     // formatted contains a valid [MCP: ...] tag that WOULD yield a few-shot
     // example on passthrough — but the gate fires first, so fewShot stays [].
     const ctx: MockRecallContext = {
@@ -160,13 +160,13 @@ describe('relevanceThreshold gate', () => {
     };
     const provider = makeProvider(0.5, ctx); // max score 0.1 < 0.5 → gated
 
-    const result = provider.recall('greet', 'local');
+    const result = await provider.recall('greet', 'local');
 
     expect(result.formatted).toBe('');
     expect(result.fewShot).toEqual([]);
   });
 
-  it('boundary: max score exactly equal to threshold → passthrough (not gated)', () => {
+  it('boundary: max score exactly equal to threshold → passthrough (not gated)', async () => {
     // "menor al umbral" gates; equal is NOT below, so context is admitted.
     const ctx: MockRecallContext = {
       memories: [{ entity: { content: 'x' }, score: 0.5 }],
@@ -179,7 +179,7 @@ describe('relevanceThreshold gate', () => {
     };
     const provider = makeProvider(0.5, ctx);
 
-    const result = provider.recall('q', 'local');
+    const result = await provider.recall('q', 'local');
 
     expect(result.formatted).toBe('CTX-boundary');
     expect(result.totalItems).toBe(1);

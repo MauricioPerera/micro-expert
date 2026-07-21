@@ -240,7 +240,7 @@ export function registerBuiltinTools(registry: ToolRegistry, memory: MemoryProvi
       required: ['query', 'userId'],
     },
     execute: async (args) => {
-      const result = memory.recall(args.query as string, args.userId as string);
+      const result = await memory.recall(args.query as string, args.userId as string);
       return result.formatted || 'No relevant context found.';
     },
   });
