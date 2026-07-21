@@ -149,41 +149,58 @@ export class AgentLoop {
    * If execution fails, replaced with [error: message].
    */
   private async processToolCalls(content: string): Promise<string> {
-    // 0. Unwrap tool tags from markdown code blocks (small models often wrap them)
+    // Built-in CALC/FETCH post-processing is gated on config.builtinTools.
+    // When disabled, any [CALC:]/[FETCH:] tag the model emits is left as literal
+    // text — it is NOT executed, so it can't be replaced with a tool error.
+    const builtinToolsEnabled = this.config.builtinTools !== false;
+
+    // 0. Unwrap tool tags from markdown code blocks (small models often wrap them).
     //    Handles ```mcp, ```json, ```text, or bare ``` fences containing tool tags.
-    content = unwrapCodeBlocks(content);
+    //    The unwrap step honors the SAME gates as execution below: CALC/FETCH only
+    //    unwrap when builtinTools is enabled, MCP only when an MCP client is
+    //    available. Otherwise a disabled gate would still mutate the response
+    //    (e.g. with builtinTools=false a fenced [FETCH: ...] would be unwrapped
+    //    and left as a bare tag, altering bytes that should be preserved verbatim).
+    const allowedTags: TagKind[] = [];
+    if (builtinToolsEnabled) allowedTags.push('CALC', 'FETCH');
+    if (this.mcp) allowedTags.push('MCP');
+    content = unwrapCodeBlocks(content, allowedTags);
 
     // 1. Process CALC tags (synchronous)
-    content = content.replace(/\[CALC:\s*(.+?)\]/g, (_match, expr: string) => {
-      try {
-        const result = safeEvaluate(expr.trim());
-        return String(result);
-      } catch (e) {
-        return `[error: ${(e as Error).message}]`;
-      }
-    });
+    if (builtinToolsEnabled) {
+      content = content.replace(/\[CALC:\s*(.+?)\]/g, (_match, expr: string) => {
+        try {
+          const result = safeEvaluate(expr.trim());
+          return String(result);
+        } catch (e) {
+          return `[error: ${(e as Error).message}]`;
+        }
+      });
+    }
 
     // 2. Process FETCH tags (async — must handle sequentially)
-    const fetchRegex = /\[FETCH:\s*([\s\S]*?)\]/g;
-    const fetchMatches = [...content.matchAll(fetchRegex)];
+    if (builtinToolsEnabled) {
+      const fetchRegex = /\[FETCH:\s*([\s\S]*?)\]/g;
+      const fetchMatches = [...content.matchAll(fetchRegex)];
 
-    if (fetchMatches.length > 0) {
-      // Process from last to first to preserve indices
-      for (let i = fetchMatches.length - 1; i >= 0; i--) {
-        const match = fetchMatches[i];
-        const raw = match[1];
-        const start = match.index!;
-        const end = start + match[0].length;
+      if (fetchMatches.length > 0) {
+        // Process from last to first to preserve indices
+        for (let i = fetchMatches.length - 1; i >= 0; i--) {
+          const match = fetchMatches[i];
+          const raw = match[1];
+          const start = match.index!;
+          const end = start + match[0].length;
 
-        let replacement: string;
-        try {
-          const request = parseFetchTag(raw);
-          replacement = await executeFetch(request);
-        } catch (e) {
-          replacement = `[error: ${(e as Error).message}]`;
+          let replacement: string;
+          try {
+            const request = parseFetchTag(raw);
+            replacement = await executeFetch(request);
+          } catch (e) {
+            replacement = `[error: ${(e as Error).message}]`;
+          }
+
+          content = content.slice(0, start) + replacement + content.slice(end);
         }
-
-        content = content.slice(0, start) + replacement + content.slice(end);
       }
     }
 
@@ -234,6 +251,14 @@ export class AgentLoop {
     const calcInstruction = 'To perform calculations, write [CALC: expression]. Example: [CALC: 15 * 3 + 7]';
     const fetchInstruction = 'To fetch data from the web, write [FETCH: GET url]. For POST: [FETCH:\\nPOST url\\nBody: {"key":"value"}]';
 
+    // Built-in tool instructions are only appended when enabled. When disabled
+    // (config.builtinTools === false), neither the instructions nor the
+    // post-processing of [CALC:]/[FETCH:] tags run — so sub-1B models that
+    // imitate a "[FETCH: ...]" pattern on factual questions no longer get the
+    // tag executed and replaced with a tool error. Default true = no change.
+    const builtinToolsEnabled = this.config.builtinTools !== false;
+    const builtinInstruction = builtinToolsEnabled ? `\n${calcInstruction}\n${fetchInstruction}` : '';
+
     // MCP tool instructions (only if MCP tools are available)
     const mcpInstruction = this.mcp ? this.mcp.toSystemPromptSection(this.config.mcpMaxTools) : '';
 
@@ -245,17 +270,24 @@ export class AgentLoop {
       systemContent = context.trim()
         ? `${context}\n\n${dateContext}\n\n${request.systemPrompt}`
         : `${dateContext}\n\n${request.systemPrompt}`;
-      systemContent += `\n${calcInstruction}\n${fetchInstruction}`;
+      systemContent += builtinInstruction;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
       systemContent += noThink;
     } else if (context.trim()) {
       // Put context BEFORE the role instruction — small models pay more attention to early tokens
-      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.\n${calcInstruction}\n${fetchInstruction}`;
+      systemContent = `${context}\n\n${dateContext}\n\nYou are MicroExpert, a helpful AI assistant.${builtinInstruction}`;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
-      systemContent += '\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.\nWhen memory shows [MCP: ...] examples, you MUST use exactly that format. Copy the [MCP: tool_name {args}] pattern from memory, replacing values as needed. Do NOT explain how to use tools — just write the [MCP: ...] tag directly.';
+      systemContent += '\nIMPORTANT: Use the information above to answer the user. If the user asks about themselves, use the facts from memory above.';
+      // Only steer the model toward the [MCP: ...] tag format when MCP tools are
+      // actually available. Without any configured tool, this instruction made
+      // sub-1B models emit spurious [MCP: ...] tags instead of factual answers
+      // (see issue #3). The factual-recall instruction above stays unconditional.
+      if (mcpInstruction) {
+        systemContent += '\nWhen memory shows [MCP: ...] examples, you MUST use exactly that format. Copy the [MCP: tool_name {args}] pattern from memory, replacing values as needed. Do NOT explain how to use tools — just write the [MCP: ...] tag directly.';
+      }
       systemContent += noThink;
     } else {
-      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}\n${calcInstruction}\n${fetchInstruction}`;
+      systemContent = `You are MicroExpert, a helpful AI assistant. ${dateContext}${builtinInstruction}`;
       if (mcpInstruction) systemContent += `\n${mcpInstruction}`;
       systemContent += '\nAnswer concisely and accurately.';
       systemContent += noThink;
@@ -304,18 +336,24 @@ function stripThinkingTokens(content: string): string {
   return content.trim();
 }
 
+type TagKind = 'CALC' | 'FETCH' | 'MCP';
+
 /**
  * Unwrap tool tags that the model wrapped in markdown code fences.
  * E.g., ```mcp\n[MCP: tool {args}]\n``` → [MCP: tool {args}]
- * Only unwraps blocks whose content contains tool tags ([CALC:, [FETCH:, [MCP:).
+ * Only unwraps blocks whose content contains one of `allowedTags`, so the unwrap
+ * step respects the same gates as execution (builtinTools / MCP availability)
+ * and never alters the response for a tool kind that is disabled.
  */
-function unwrapCodeBlocks(content: string): string {
-  return content.replace(/```(?:\w*)\n([\s\S]*?)```/g, (_match, inner: string) => {
+function unwrapCodeBlocks(content: string, allowedTags: TagKind[] = ['CALC', 'FETCH', 'MCP']): string {
+  if (allowedTags.length === 0) return content;
+  const tagPattern = new RegExp(`\\[(?:${allowedTags.join('|')}):`);
+  return content.replace(/```(?:\w*)\n([\s\S]*?)```/g, (match, inner: string) => {
     const trimmed = inner.trim();
-    if (/\[(CALC|FETCH|MCP):/.test(trimmed)) {
+    if (tagPattern.test(trimmed)) {
       return trimmed;
     }
-    return _match; // Not a tool block — leave it alone
+    return match; // Not an allowed tool block — leave it alone
   });
 }
 
