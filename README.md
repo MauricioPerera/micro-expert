@@ -781,6 +781,8 @@ Config priority: **CLI args > env vars > config file > defaults**
   "contextBudget": 4096,
   "thinkingMode": false,
   "recallTemplate": "default",
+  "builtinTools": true,
+  "relevanceThreshold": 0,
   "threads": 0,
   "mcpServers": {},
   "mcpMaxTools": 10,
@@ -791,6 +793,32 @@ Config priority: **CLI args > env vars > config file > defaults**
   }
 }
 ```
+
+### Recommended configuration (sub-1B / 1B-class models)
+
+Measured with MiniCPM5-1B (Q8_0) on a seeded-facts eval — full evidence in
+[evaluaciones-modelos-locales](https://github.com/MauricioPerera/evaluaciones-modelos-locales)
+and the investigation trail in [#3](https://github.com/MauricioPerera/micro-expert/issues/3):
+
+```json
+{
+  "builtinTools": false,
+  "relevanceThreshold": 0.35
+}
+```
+
+- **`builtinTools: false`** — small models imitate the `[CALC:]`/`[FETCH:]` tag syntax on
+  ordinary factual questions and the executed tag error replaces the answer. Disabling the
+  built-in tools removed 100% of tool-syntax artifacts across our eval (keep `true` if you
+  actually use them).
+- **`relevanceThreshold`** — score floor for context injection; below it, no memories are
+  injected at all. Eliminates pollution on off-topic questions (a populated store made
+  "What is the capital of France?" answer from irrelevant memories). The score scale is
+  RepoMemory's unnormalized hybrid ranking: **calibrate empirically for your store** (start
+  low, raise until off-topic questions stop receiving context). `0` disables the gate.
+- With score-gated retrieval, a 1B model matched a 27B (10/10 vs 10/10) on curated-knowledge
+  lookup at 1/19th the latency — for this use case, invest in retrieval quality before
+  model size.
 
 ### Environment variables
 
