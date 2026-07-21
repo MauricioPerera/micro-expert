@@ -3,7 +3,7 @@ import { AgentLoop } from '../src/agent/loop.js';
 import type { InferenceClient, ChatMessage, StreamDelta, ChatCompletionOptions } from '../src/inference/client.js';
 import type { MemoryProvider, RecallResult } from '../src/memory/provider.js';
 import type { McpClientManager } from '../src/mcp/index.js';
-import { loadConfig } from '../src/config.js';
+import type { MicroExpertConfig } from '../src/config.js';
 
 /** Create a mock inference client */
 function mockInferenceClient(response: string): InferenceClient {
@@ -42,7 +42,32 @@ function mockMemoryProvider(contextToReturn = ''): MemoryProvider {
 }
 
 describe('AgentLoop', () => {
-  const config = loadConfig();
+  // Self-contained config literal — no disk/env reads (issue #5).
+  // Values mirror src/config.ts DEFAULTS so the tested behavior is unchanged;
+  // only the origin of the config differs. Path fields are inert here because
+  // inference and memory are mocked and no real server is started.
+  const config: MicroExpertConfig = {
+    modelPath: '/tmp/micro-expert/models/model.gguf',
+    llamaServerPath: '/tmp/micro-expert/bin/llama-server',
+    port: 3333,
+    host: '127.0.0.1',
+    agentId: 'micro-expert',
+    defaultUserId: 'local',
+    idleTimeout: 300,
+    maxTokens: 512,
+    temperature: 0.7,
+    topP: 0.9,
+    recallLimit: 5,
+    contextBudget: 4096,
+    thinkingMode: false,
+    llamaServerPort: 0,
+    contextSize: 4096,
+    threads: 0,
+    recallTemplate: 'default',
+    mcpServers: {},
+    mcpMaxTools: 10,
+    mmprojPath: '',
+  };
 
   it('should run the full pipeline: recall → infer → save', async () => {
     const inference = mockInferenceClient('Hello, world!');
