@@ -820,6 +820,50 @@ and the investigation trail in [#3](https://github.com/MauricioPerera/micro-expe
   lookup at 1/19th the latency — for this use case, invest in retrieval quality before
   model size.
 
+### External retrieval with rag-local (integration pattern)
+
+For maximum retrieval quality you can pair MicroExpert with
+[rag-local](https://github.com/MauricioPerera/rag-local) — semantic embeddings
+(embeddinggemma-300m), per-collection **knowledge contracts**, score
+`threshold`, and multi-hop **link expansion**. This is a **host-side pattern**,
+not a built-in flag: your host code queries rag-local first and hands the
+retrieved facts to the model as context, so the LLM never orchestrates
+retrieval (small models must not — see the tool-imitation findings in #3).
+
+```
+question ──► rag-local  POST /collections/kb/query
+             {"text": q, "k": 5, "threshold": 0.35, "expand_links": true, "hops": 2}
+        ◄── hits (score-gated + link-expanded)
+build system prompt:
+  "Facts from memory:
+- <hit descriptions, links rendered as plain text>
+
+
+   You are MicroExpert... IMPORTANT: Use the information above."
+──► MicroExpert /v1/chat/completions (or llama-server directly)
+```
+
+Measured (same seeded-facts oracles, 1B model): single-fact lookup went from
+5-6/10 with built-in recall to **10/10** with this pattern (zero pollution on
+off-topic questions), and multi-fact synthesis from 64% to **91%** once the
+collection used a knowledge contract (absolute facts + declared links) with
+`threshold` + `hops: 2`. A 27B consumer reached 100% on the same retrieval.
+Full evidence:
+[evaluaciones-modelos-locales](https://github.com/MauricioPerera/evaluaciones-modelos-locales).
+
+Guidelines that made the difference:
+
+- **Model facts absolutely** ("metrics service listens on port 7444"), never
+  relative to another entry ("the port immediately after the gateway") — the
+  contract's `forbid_relative` rejects these at ingestion.
+- **Declare links between related entries** so chains resolve via `hops`.
+- **Keep injected context minimal**: small models degrade with noise — the
+  same question that fails with 6 facts injected succeeds with 2.
+
+A native pluggable retrieval provider (so MicroExpert's own recall could call
+rag-local instead of RepoMemory) is a natural follow-up; today the pattern
+lives in host code.
+
 ### Environment variables
 
 All use the `MICRO_EXPERT_` prefix:
